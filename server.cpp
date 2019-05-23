@@ -206,7 +206,6 @@ int main(int argc, char const** argv)
     int sock;
     struct sockaddr_in local_address;
     struct ip_mreq ip_mreq;
-    in_port_t local_port = static_cast<in_port_t>(so.cmd_port.value());
     char buffer[1024];
     ssize_t rcv_len;
     int i;
@@ -219,6 +218,7 @@ int main(int argc, char const** argv)
     }
 
     // podpięcie się do grupy rozsyłania (ang. multicast)
+    ip_mreq.imr_multiaddr.s_addr = inet_addr(so.mcast_addr.value().c_str());
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(so.mcast_addr.value().c_str(), &ip_mreq.imr_multiaddr) == 0)
     {
@@ -234,14 +234,14 @@ int main(int argc, char const** argv)
 
     // podpięcie się pod lokalny adres i port
     local_address.sin_family = AF_INET;
-    local_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    local_address.sin_port = htons(local_port);
+    local_address.sin_addr.s_addr = htonl(INADDR_ANY); // inet_addr(so.mcast_addr.value().c_str()); // ;
+    local_address.sin_port = htons(static_cast<in_port_t>(so.cmd_port.value()));
     if (bind(sock, (struct sockaddr *)&local_address, sizeof local_address) < 0)
     {
         syserr("bind");
     }
 
-    TRACE("I'VE BINDED!\n");
+    TRACE("I'M BINDED TO: %s:%d!\n", inet_ntoa(local_address.sin_addr), htons(local_address.sin_port));
 
     // TODO: Here I have a fd (socket) from which i can read the stuff.
 
@@ -250,14 +250,28 @@ int main(int argc, char const** argv)
     {
         // TODO: Figure out how this stuff works
         simpl_cmd cmd;
+#if 0
         ssize_t rcv_len = read(sock, cmd.bytes, sizeof(simpl_cmd));
+#else
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(struct sockaddr_in);
+        char buf[1024];
+        memset(buf, 0x00, 1024);
+        ssize_t rcv_len = recvfrom(sock, cmd.bytes, sizeof(simpl_cmd), 0,
+                                   (struct sockaddr *)&from, &fromlen);
+#endif
         if (rcv_len < 0)
         {
             syserr("read");
         }
         else
         {
-            TRACE("read %zd bytes\n", rcv_len); // (int)rcv_len, cmd.bytes
+            TRACE("read %zd bytes (from %s:%d) %.*s\n",
+                  rcv_len, inet_ntoa(from.sin_addr), from.sin_port, rcv_len, buf);
+
+            char const* msg = "Mateusz___";
+	    
+            write(sock, msg, 1);
         }
     }
 
