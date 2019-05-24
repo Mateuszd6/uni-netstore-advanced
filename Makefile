@@ -1,7 +1,7 @@
 # TODO: Better make for boost libs?
 .PHONY: all debug release clean
 
-CC=g++
+CC=clang++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -fno-omit-frame-pointer

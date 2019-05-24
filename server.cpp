@@ -10,7 +10,6 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -62,34 +61,34 @@ constexpr static uint32 strhash(const char* str, int h = 0)
 // NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
 //       bytes (65535 - 8 byte UDP header - 20 byte IP header). ~Wikipedia.
 constexpr size_t upd_max_data_size = 65507;
-struct simpl_cmd
+union cmd
 {
-    union
+    struct __attribute__((__packed__)) simpl
     {
-        struct
-        {
-            char cmd[10];
-            uint64 cmd_seq;
-            uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
-        };
-        uint8 bytes[upd_max_data_size];
+        uint64 cmd_seq;
+        char cmd[10];
+        uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
     };
+    struct __attribute__((__packed__)) cmplx
+    {
+        uint64 cmd_seq;
+        uint64 param;
+        char cmd[10];
+        uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
+    };
+    uint8 bytes[upd_max_data_size];
+
+    void clear()
+    {
+        bzero(bytes, upd_max_data_size);
+    }
 };
 
-struct cmplx_cmd
-{
-    union
-    {
-        struct
-        {
-            char cmd[10];
-            uint64 cmd_seq;
-            uint64 param;
-            uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
-        };
-        uint8 bytes[upd_max_data_size];
-    };
-};
+// Make sure that the cmd union is packed properly.
+static_assert(sizeof(cmd::bytes) == upd_max_data_size);
+static_assert(sizeof(cmd::bytes) == sizeof(cmd));
+static_assert(sizeof(cmd::bytes) == sizeof(cmd::simpl));
+static_assert(sizeof(cmd::bytes) == sizeof(cmd::cmplx));
 
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
@@ -183,7 +182,7 @@ int main(int argc, char const** argv)
     TRACE("OPTIONS:\n");
     TRACE("  MCAST_ADDR = %s\n", so.mcast_addr.value().c_str());
     TRACE("  CMD_PORT = %d\n", so.cmd_port.value());
-    TRACE("  MAX_SPACE = %d\n", so.max_space.value());
+    TRACE("  MAX_SPACE = %ld\n", so.max_space.value());
     TRACE("  SHRD_FLDR = %s\n", so.shrd_fldr.value().c_str());
     TRACE("  TIMEOUT = %d\n", so.timeout.value());
 
@@ -202,82 +201,82 @@ int main(int argc, char const** argv)
     so.max_space.value() -= total_size;
     TRACE("Space left: %ld\n", so.max_space.value());
 
+    // SERVER STUFF: (TODO: Move away!)
+    // argumenty wywołania programu
+    char const* multicast_dotted_address; // TODO: Dont use, we have a string for that in so.
+    in_port_t local_port;
+
     // zmienne i struktury opisujące gniazda
     int sock;
-    struct sockaddr_in local_address;
+    struct sockaddr_in local_address, remote_address;
     struct ip_mreq ip_mreq;
-    char buffer[1024];
+    unsigned int remote_len;
+
+    // zmienne obsługujące komunikację
     ssize_t rcv_len;
     int i;
+
+    multicast_dotted_address = so.mcast_addr.value().c_str();
+    local_port = (in_port_t)(so.cmd_port.value());
 
     // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
-    {
         syserr("socket");
-    }
 
     // podpięcie się do grupy rozsyłania (ang. multicast)
-    ip_mreq.imr_multiaddr.s_addr = inet_addr(so.mcast_addr.value().c_str());
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (inet_aton(so.mcast_addr.value().c_str(), &ip_mreq.imr_multiaddr) == 0)
-    {
+    if (inet_aton(multicast_dotted_address, &ip_mreq.imr_multiaddr) == 0)
         syserr("inet_aton");
-    }
-
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&ip_mreq, sizeof ip_mreq) < 0)
-    {
         syserr("setsockopt");
-    }
-
-    TRACE("I'VE REACHED HERE!\n");
 
     // podpięcie się pod lokalny adres i port
     local_address.sin_family = AF_INET;
-    local_address.sin_addr.s_addr = htonl(INADDR_ANY); // inet_addr(so.mcast_addr.value().c_str()); // ;
-    local_address.sin_port = htons(static_cast<in_port_t>(so.cmd_port.value()));
-    if (bind(sock, (struct sockaddr *)&local_address, sizeof local_address) < 0)
-    {
+    local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_address.sin_port = htons(local_port);
+    if (bind(sock, (struct sockaddr*)&local_address, sizeof local_address) < 0)
         syserr("bind");
-    }
 
-    TRACE("I'M BINDED TO: %s:%d!\n", inet_ntoa(local_address.sin_addr), htons(local_address.sin_port));
-
-    // TODO: Here I have a fd (socket) from which i can read the stuff.
+    cmd c{};
 
     // czytanie tego, co odebrano
     for (;;)
     {
-        // TODO: Figure out how this stuff works
-        simpl_cmd cmd;
-#if 0
-        ssize_t rcv_len = read(sock, cmd.bytes, sizeof(simpl_cmd));
-#else
-        struct sockaddr_in from;
-        socklen_t fromlen = sizeof(struct sockaddr_in);
-        char buf[1024];
-        memset(buf, 0x00, 1024);
-        ssize_t rcv_len = recvfrom(sock, cmd.bytes, sizeof(simpl_cmd), 0,
-                                   (struct sockaddr *)&from, &fromlen);
-#endif
+        c.clear(); // TODO: Probobly unndeeded, becasue of the default construction of cmd.
+        rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (struct sockaddr*)&remote_address, &remote_len);
         if (rcv_len < 0)
         {
             syserr("read");
         }
         else
         {
-            TRACE("read %zd bytes (from %s:%d) %.*s\n",
-                  rcv_len, inet_ntoa(from.sin_addr), from.sin_port, rcv_len, buf);
-
-            char const* msg = "Mateusz___";
-	    
-            write(sock, msg, 1);
+            printf("read %zd bytes: %.*s\n", rcv_len, (int)rcv_len, c.bytes);
+            if (strcmp(reinterpret_cast<char*>(c.bytes), "GET_TIME") == 0)
+            {
+                char response_buf[] = "Mateusz says hello!";
+                if (sendto(sock, response_buf, sizeof(response_buf), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
+                {
+                    syserr("sendto");
+                }
+                else
+                {
+                    printf("Sent msg: %.*s\n", static_cast<int>(sizeof(response_buf)), response_buf);
+                }
+            }
+            else
+            {
+                printf("Received unexpected bytes.\n");
+            }
         }
     }
-
     // w taki sposób można odpiąć się od grupy rozsyłania
     if (setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, (void*)&ip_mreq, sizeof ip_mreq) < 0)
         syserr("setsockopt");
+
+    // koniec
+    close(sock);
+    exit(EXIT_SUCCESS);
 
     return 0;
 }
