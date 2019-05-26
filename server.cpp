@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <thread>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -97,6 +98,17 @@ union cmd
 
     uint8 bytes[upd_max_data_size];
 
+    cmd()
+    {
+        clear();
+    }
+
+    cmd(char const* head_, uint64 cmd_seq_) : cmd()
+    {
+        set_head(head_);
+        set_cmd_seq(cmd_seq_);
+    }
+
     char const* get_head()
     {
         return &(head[0]);
@@ -140,6 +152,26 @@ union cmd
     void clear()
     {
         bzero(&bytes[0], upd_max_data_size);
+    }
+
+    // if expect_data is false, we make sure, that the whole data[] array is
+    // zeroed. Otherwise the packet is concidered to be ill formed.
+    bool validate(char const* expected_header,
+                  bool is_cmplx,
+                  bool expect_data) const
+    {
+        int32 exp_head_len = strlen(expected_header);
+        assert(exp_head_len <= 10);
+
+        if (memcmp(head, expected_header, exp_head_len) != 0)
+            return false;
+
+        // Check if the trailing bytes in the HEAD are set to 0.
+        for (int i = exp_head_len; i < 10; ++i)
+            if (head[i] != 0)
+                return false;
+
+        return true;
     }
 };
 
@@ -225,8 +257,154 @@ server_options parse_args(int argc, char const** argv)
 
 void handle_interrput(sig_t s){
     TRACE("Got interrupt signal. Exitting safetly...\n");
-    exit(1);
+    std::terminate();
 }
+
+// TODO: CHECK macro!
+#define CHECK(X) X
+
+#if 0
+std::thread read_thread;
+bool read_thread_started = false;
+
+void read_file(int sock, sockaddr_in server_address) {
+    printf("Accepting clients on port %hu\n", ntohs(server_address.sin_port));
+
+    struct timeval timeout;
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    if (setsockopt (sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0)
+        syserr("setsockopt failed\n");
+
+    // get client connection from the socket
+    sockaddr_in client_address;
+    socklen_t client_address_len = sizeof (client_address);
+    int msg_sock;
+    CHECK(msg_sock = accept(sock, (sockaddr *)&client_address, &client_address_len));
+
+
+    ssize_t read_bytes;
+    char buffer[1024];
+    while((read_bytes = read(msg_sock, buffer, 1024)) > 0)
+    {
+        printf("Got: '%.*s'\n", read_bytes, buffer);
+    }
+
+    printf("Cleaning up!\n");
+    close(msg_sock);
+    close(sock);
+}
+
+in_port_t open_fileupload_conn()
+{
+    int sock;
+    sockaddr_in server_address;
+    socklen_t server_address_len;
+
+    // Create an IPv4 socket.
+    CHECK((sock = socket(PF_INET, SOCK_STREAM, 0)));
+
+    // IPv4, all interfaces, and port taken from input data.
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_address.sin_port = htons(3000);
+
+    // Bind the socket to a concrete address, and switch for listening.
+    CHECK(bind(sock, (sockaddr *)&server_address, server_address_len));
+
+    CHECK(listen(sock, SOMAXCONN));
+
+    in_port_t retval = server_address.sin_port;
+
+    if (read_thread_started)
+        read_thread.join();
+    read_thread = std::thread{read_file, sock, server_address};
+    read_thread_started = true;
+
+    return retval;
+}
+#else
+
+std::thread read_thread;
+bool read_thread_started = false;
+
+struct __attribute__((__packed__)) DataStructure {
+  uint16_t seq_no;
+  uint32_t number;
+};
+
+std::pair<int, in_port_t> init_tcp_conn()
+{
+    int sock;
+    struct sockaddr_in server_address;
+    socklen_t server_address_len = sizeof(server_address);
+
+    sock = socket(PF_INET, SOCK_STREAM, 0); // creating IPv4 TCP socket
+    if (sock < 0)
+        syserr("socket");
+
+    server_address.sin_family = AF_INET; // IPv4
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
+    server_address.sin_port = htons(0); // listening on port PORT_NUM
+
+    // bind the socket to a concrete address
+    if (bind(sock, (struct sockaddr *) &server_address, sizeof(server_address)) < 0)
+        syserr("bind");
+
+    // As passing 0 to sin_port got us random port, bind does not set this in
+    // the server_address struct, and we have to get it manually by getsockname.
+    if (getsockname(sock, (sockaddr *)(&server_address), &server_address_len) < 0)
+        syserr("getsockname");
+
+    return {sock, server_address.sin_port};
+}
+
+void tcp_start_conn(int sock)
+{
+    int msg_sock;
+    struct DataStructure data_read;
+    struct sockaddr_in client_address;
+    socklen_t client_address_len = sizeof(client_address);;
+
+    // switch to listening (passive open)
+    if (listen(sock, 5) < 0)
+        syserr("listen");
+
+
+    // get client connection from the socket
+    msg_sock = accept(sock, (struct sockaddr *) &client_address, &client_address_len);
+    if (msg_sock < 0)
+        syserr("accept");
+
+    ssize_t prev_len = 0; // number of bytes already in the buffer
+    ssize_t len;
+    do {
+        ssize_t remains = sizeof(data_read) - prev_len; // number of bytes to be read
+        len = read(msg_sock, ((char*)&data_read) + prev_len, remains);
+        printf("Read some bytes\n");
+
+        if (len < 0)
+            syserr("reading from client socket");
+        else if (len>0) {
+            printf("read %zd bytes from socket\n", len);
+            prev_len += len;
+
+            if (prev_len == sizeof(data_read)) {
+                // we have received a whole structure
+                printf("received packet no %d: %u\n", ntohs(data_read.seq_no), ntohl(data_read.number));
+                prev_len = 0;
+            }
+        }
+    } while (len > 0);
+
+    printf("ending connection\n");
+    if (close(msg_sock) < 0)
+        syserr("close");
+
+    if (close(sock) < 0)
+        syserr("close");
+}
+#endif
 
 int main(int argc, char const** argv)
 {
@@ -316,13 +494,9 @@ int main(int argc, char const** argv)
 
             if (c.check_header("HELLO"))
             {
-                // TODO: Make sure that DATA is empty!
                 printf("Received msg: HELLO\n");
 
-                cmd response{};
-                response.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
-                // TODO: Cmd_seq!!!
-                response.set_head("GOOD_DAY");
+                cmd response{"GOOD_DAY", c.cmd_seq};
                 response.cmplx.set_param(so.max_space.value());
                 memcpy(response.cmplx.data, so.mcast_addr.value().c_str(), so.mcast_addr.value().size());
 
@@ -338,10 +512,7 @@ int main(int argc, char const** argv)
             {
                 // TODO: Make sure that DATA is empty!
                 printf("Received msg: LIST\n");
-                cmd response{};
-                response.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
-                // TODO: Cmd_seq!!!
-                response.set_head("MY_LIST");
+                cmd response{"MY_LIST", c.cmd_seq};
 
                 std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
                 for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
@@ -367,6 +538,35 @@ int main(int argc, char const** argv)
                     syserr("sendto");
                 else
                     printf("Sent msg: [%.*s]\n", 10, response.head);
+            }
+            else if (c.check_header("GET"))
+            {
+                // TODO: Make sure that DATA is _NOT_ empty -> cannot have an empty filename.
+                printf("Received msg: GET\n");
+                printf("Adding file: %s\n", c.cmplx.data);
+
+                // TODO: Check if such file exists.
+
+                // The init happens in the main thread so that we know the port
+                // id. Then we start a new thread giving it a created socket.
+                auto[socket, port] = init_tcp_conn();
+                cmd response{"CONNECT_ME", c.cmd_seq};
+                response.cmplx.set_param(ntohs(port));
+                printf("Listening on port %hu\n", ntohs(port));
+                if (read_thread_started)
+                    read_thread.join();
+                read_thread = std::thread{tcp_start_conn, socket};
+                read_thread_started = true;
+
+                if (sendto(sock, response.bytes, sizeof(response), 0,
+                           (struct sockaddr*)&remote_address, remote_len) == -1)
+                {
+                    syserr("sendto");
+                }
+                else
+                {
+                    printf("Sent msg: [%.*s]\n", 10, response.head);
+                }
             }
             else
             {
