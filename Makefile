@@ -11,7 +11,7 @@ LINK_FLAGS=-lstdc++fs
 WARN_FLAGS=-Wall -Wextra -Wshadow
 
 # students has completly broken sanitizer dependencies.
-SANITIZERS= #-fsanitize=address,undefined
+SANITIZERS=-fsanitize=undefined
 
 COMMON_OBJ=
 CLIENT_OBJ=client.o
@@ -35,10 +35,10 @@ all: clean $(CLIENT_EXE) $(SERVER_EXE) # TODO: Dont clean
 
 
 $(CLIENT_EXE): $(COMMON_OBJ) $(CLIENT_OBJ)
-	$(CC) $(COMMON_OBJ) $(CLIENT_OBJ) -o $(CLIENT_EXE) $(LINK_FLAGS)
+	$(CC) $(SANITIZERS) $(COMMON_OBJ) $(CLIENT_OBJ) -o $(CLIENT_EXE) $(LINK_FLAGS)
 
 $(SERVER_EXE): $(COMMON_OBJ) $(SERVER_OBJ)
-	$(CC) $(COMMON_OBJ) $(SERVER_OBJ) -o $(SERVER_EXE) $(LINK_FLAGS)
+	$(CC) $(SANITIZERS) $(COMMON_OBJ) $(SERVER_OBJ) -o $(SERVER_EXE) $(LINK_FLAGS)
 
 clean:
 	@rm -f *.o

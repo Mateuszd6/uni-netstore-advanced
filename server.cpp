@@ -63,32 +63,93 @@ constexpr static uint32 strhash(const char* str, int h = 0)
 constexpr size_t upd_max_data_size = 65507;
 union cmd
 {
-    struct __attribute__((__packed__)) simpl
+    struct __attribute__((__packed__))
     {
+        char head[10];
         uint64 cmd_seq;
-        char cmd[10];
-        uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
+
+        union {
+            struct __attribute__((__packed__))
+            {
+                uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
+            } simpl;
+
+            struct __attribute__((__packed__))
+            {
+                uint64 param;
+                uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
+
+                // Param property is only related to the cmplx part of the cmd,
+                // so we have to invoke it explicitly refering to it, so that it
+                // minimizes missuse chances.
+                uint64 get_param()
+                {
+                    return be64toh(param);
+                }
+
+                void set_param(uint64 val)
+                {
+                    param = htobe64(val);
+                }
+            } cmplx;
+        };
     };
-    struct __attribute__((__packed__)) cmplx
-    {
-        uint64 cmd_seq;
-        uint64 param;
-        char cmd[10];
-        uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
-    };
+
     uint8 bytes[upd_max_data_size];
+
+    char const* get_head()
+    {
+        return &(head[0]);
+    }
+
+    void set_head(char const* val)
+    {
+        int32 val_len = strlen(val);
+        assert(val_len <= 10);
+
+        bzero(head, 10);
+        memcpy(head, val, strlen(val));
+    }
+
+    uint64 get_cmd_seq()
+    {
+        return be64toh(cmd_seq);
+    }
+
+    void set_cmd_seq(uint64 val)
+    {
+        cmd_seq = htobe64(val);
+    }
+
+    bool check_header(char const* usr_head)
+    {
+        int32 usr_head_len = strlen(head);
+        assert(usr_head_len <= 10);
+
+        if (memcmp(head, usr_head, usr_head_len) != 0)
+            return false;
+
+        // The rest of the header must be filled with zeros, otherwise reject.
+        for (int i = usr_head_len; i < 10; ++i)
+            if (head[i] != 0)
+                return false;
+
+        return true;
+    }
 
     void clear()
     {
-        bzero(bytes, upd_max_data_size);
+        bzero(&bytes[0], upd_max_data_size);
     }
 };
 
 // Make sure that the cmd union is packed properly.
+#if 1
 static_assert(sizeof(cmd::bytes) == upd_max_data_size);
 static_assert(sizeof(cmd::bytes) == sizeof(cmd));
-static_assert(sizeof(cmd::bytes) == sizeof(cmd::simpl));
-static_assert(sizeof(cmd::bytes) == sizeof(cmd::cmplx));
+static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::simpl));
+static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::cmplx));
+#endif
 
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
@@ -243,7 +304,7 @@ int main(int argc, char const** argv)
     // czytanie tego, co odebrano
     for (;;)
     {
-        c.clear(); // TODO: Probobly unndeeded, becasue of the default construction of cmd.
+        c.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
         rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (struct sockaddr*)&remote_address, &remote_len);
         if (rcv_len < 0)
         {
@@ -252,17 +313,60 @@ int main(int argc, char const** argv)
         else
         {
             printf("read %zd bytes: %.*s\n", rcv_len, (int)rcv_len, c.bytes);
-            if (strcmp(reinterpret_cast<char*>(c.bytes), "GET_TIME") == 0)
+
+            if (c.check_header("HELLO"))
             {
-                char response_buf[] = "Mateusz says hello!";
-                if (sendto(sock, response_buf, sizeof(response_buf), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
-                {
+                // TODO: Make sure that DATA is empty!
+                printf("Received msg: HELLO\n");
+
+                cmd response{};
+                response.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
+                // TODO: Cmd_seq!!!
+                response.set_head("GOOD_DAY");
+                response.cmplx.set_param(so.max_space.value());
+                memcpy(response.cmplx.data, so.mcast_addr.value().c_str(), so.mcast_addr.value().size());
+
+                printf("Responding to: %s:%d\n",
+                       inet_ntoa(remote_address.sin_addr),
+                       htons(remote_address.sin_port));
+                if (sendto(sock, response.bytes, sizeof(response), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
                     syserr("sendto");
-                }
                 else
-                {
-                    printf("Sent msg: %.*s\n", static_cast<int>(sizeof(response_buf)), response_buf);
-                }
+                    printf("Sent msg: [%.*s]\n", 10, response.head);
+            }
+            else if (c.check_header("LIST"))
+            {
+                // TODO: Make sure that DATA is empty!
+                printf("Received msg: LIST\n");
+                cmd response{};
+                response.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
+                // TODO: Cmd_seq!!!
+                response.set_head("MY_LIST");
+
+                std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
+                for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
+                    if (entry.is_regular_file())
+                    {
+                        TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
+
+                        if (filenames.size() > 0)
+                            filenames.append("\n");
+                        filenames.append(entry.path().filename().c_str());
+                    }
+
+                // TODO: Handle the case, when these are greater.
+                assert(filenames.size() <= sizeof(cmd::simpl));
+                printf("Filenames: {%s}\n", filenames.c_str());
+                memcpy(response.simpl.data, filenames.c_str(), filenames.size());
+
+                printf("Responding to: %s:%d\n",
+                       inet_ntoa(remote_address.sin_addr),
+                       htons(remote_address.sin_port));
+
+                if (sendto(sock, response.bytes, sizeof(response), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
+                    syserr("sendto");
+                else
+                    printf("Sent msg: [%.*s]\n", 10, response.head);
             }
             else
             {
@@ -270,6 +374,7 @@ int main(int argc, char const** argv)
             }
         }
     }
+
     // w taki sposób można odpiąć się od grupy rozsyłania
     if (setsockopt(sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, (void*)&ip_mreq, sizeof ip_mreq) < 0)
         syserr("setsockopt");
