@@ -1,14 +1,14 @@
 #include <arpa/inet.h>
-#include <errno.h>
+#include <cerrno>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <time.h>
+#include <ctime>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -113,7 +113,6 @@ main(int argc, char* argv[])
     unsigned int remote_len;
 
     // zmienne obsługujące komunikację
-    char buffer[BSIZE];
     size_t length;
     int i;
 
@@ -169,12 +168,14 @@ main(int argc, char* argv[])
     ssize_t rcv_len;
     for (i = 0; i < REPEAT_COUNT; ++i)
     {
+        cmd request{"LIST", 2};
+        memcpy(request.simpl.data, ".o", 2);
         printf("Sending request...\n");
-        bzero(buffer, BSIZE);
-        strncpy(buffer, "GET", BSIZE);
-        length = strnlen(buffer, BSIZE);
-        if (sendto(sock, buffer, length, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != length)
+        if (sendto(sock, request.bytes, sizeof(request), 0,
+                   (sockaddr*)&remote_address, sizeof(remote_address)) != sizeof(request))
+        {
             syserr("write");
+        }
 
         // TODO: If timeout should errno be set to ETIMEDOUT..? It returns EAGAIN!!!
 
@@ -218,7 +219,7 @@ main(int argc, char* argv[])
             else if (rcv_len > 0)
             {
                 printf("Time difference: %lu\n", time_diff.count());
-#if 1
+#if 0
                 printf("Received [CMPLX] (from %s:%d): %.*s %lu {%s}\n",
                        inet_ntoa(from_address.sin_addr),
                        htons(from_address.sin_port),

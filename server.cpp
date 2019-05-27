@@ -1,20 +1,21 @@
 // TODO: Fix c headers!
-#include <assert.h>
+#include <cassert>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <string>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <filesystem>
 #include <optional>
+#include <string>
 namespace fs = std::filesystem;
 namespace chrono = std::chrono;
 using namespace std::chrono_literals;
@@ -252,12 +253,12 @@ int main(int argc, char const** argv)
     if (bind(sock, (struct sockaddr*)&local_address, sizeof local_address) < 0)
         syserr("bind");
 
-    cmd c{};
-
     // czytanie tego, co odebrano
     for (;;)
     {
-        c.clear(); // TODO: Probably unndeeded, becasue of the default construction of cmd.
+        printf("AWAITING NEXT!!!!\n");
+
+        cmd c{};
         rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (struct sockaddr*)&remote_address, &remote_len);
         if (rcv_len < 0)
         {
@@ -287,17 +288,30 @@ int main(int argc, char const** argv)
             {
                 // TODO: Make sure that DATA is empty!
                 printf("Received msg: LIST\n");
-                cmd response{"MY_LIST", c.cmd_seq};
 
+                // TODO: Decide what happend when rcv'ed: "FOO\0\0BAR"
+                std::string pattern{(char const*)c.simpl.data};
+
+                cmd response{"MY_LIST", c.cmd_seq};
                 std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
                 for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
                     if (entry.is_regular_file())
                     {
+                        std::string filename = entry.path().filename();
+                        if (pattern.size() > 0 &&
+                            std::search(filename.begin(), filename.end(),
+                                        pattern.begin(), pattern.end()) == filename.end())
+                        {
+                            // We _didn't_ find patter, so we skip.
+                            continue;
+                        }
+
                         TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
 
+                        // If there were some entries before, split them with \n.
                         if (filenames.size() > 0)
                             filenames.append("\n");
-                        filenames.append(entry.path().filename().c_str());
+                        filenames.append(filename.c_str());
                     }
 
                 // TODO: Handle the case, when these are greater.
