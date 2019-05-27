@@ -21,7 +21,8 @@
 namespace chrono = std::chrono;
 using namespace std::chrono_literals;
 
-#include "err.h"
+#include "common.hpp"
+#include "cmd.hpp"
 
 #define BSIZE 256
 #define TTL_VALUE 4
@@ -30,38 +31,7 @@ using namespace std::chrono_literals;
 
 #define PORT 10001
 
-// TODO: Move to common.
-using int8 = int8_t;
-using uint8 = uint8_t;
-using int16 = int16_t;
-using uint16 = uint16_t;
-using int32 = int32_t;
-using uint32 = uint32_t;
-using int64 = int64_t;
-using uint64 = uint64_t;
-
-#ifdef DEBUG
-#  define TRACE(...) fprintf(stderr, __VA_ARGS__)
-#else
-#  define TRACE(...) (void)0
-#endif
-
-// TODO: Make it legit
-#define syserr(WHY)                             \
-    do {                                        \
-        printf(WHY);                            \
-        exit(-1);                               \
-    } while (0)
-
-// TODO: Make it legit
-#define fatal(...)                              \
-    do {                                        \
-        printf(__VA_ARGS__);                    \
-        exit(-1);                               \
-    } while (0)
-
-
-// TODO: Decide whether or not this stays:
+// TODO: Decide whether or not this stays. TODO: Templetize with duration.
 timeval chrono_to_timeval(chrono::microseconds usec)
 {
     timeval retval;
@@ -77,69 +47,6 @@ timeval chrono_to_timeval(chrono::microseconds usec)
 
     return retval;
 }
-
-// NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
-//       bytes (65535 - 8 byte UDP header - 20 byte IP header). ~Wikipedia.
-constexpr size_t upd_max_data_size = 65507;
-union cmd
-{
-    struct __attribute__((__packed__))
-    {
-        char cmd[10];
-        uint64 cmd_seq;
-        uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
-    } simpl;
-
-    struct __attribute__((__packed__))
-    {
-        char cmd[10];
-        uint64 cmd_seq;
-        uint64 param;
-        uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
-
-        uint64 get_param()
-        {
-            return be64toh(param);
-        }
-
-        void set_param(uint64 val)
-        {
-            param = htobe64(val);
-        }
-    } cmplx;
-
-    uint8 bytes[upd_max_data_size];
-
-    uint64 get_cmd_seq()
-    {
-        return be64toh(simpl.cmd_seq);
-    }
-
-    void set_cmd_seq(uint64 val)
-    {
-        simpl.cmd_seq = htobe64(val);
-    }
-
-    bool check_header(char const* head)
-    {
-        int32 head_len = strlen(head);
-
-        if (memcmp(simpl.cmd, head, head_len) != 0)
-            return false;
-
-        // The rest of the header must be filled with zeros, otherwise reject.
-        for (int i = head_len; i < 10; ++i)
-            if (simpl.cmd[i] != 0)
-                return false;
-
-        return true;
-    }
-
-    void clear()
-    {
-        bzero(&bytes[0], upd_max_data_size);
-    }
-};
 
 struct search_entry
 {
@@ -315,7 +222,7 @@ main(int argc, char* argv[])
                 printf("Received [CMPLX] (from %s:%d): %.*s %lu {%s}\n",
                        inet_ntoa(from_address.sin_addr),
                        htons(from_address.sin_port),
-                       (int)rcv_len, response.cmplx.cmd,
+                       (int)rcv_len, response.head,
                        response.cmplx.get_param(),
                        response.cmplx.data);
 
@@ -329,7 +236,7 @@ main(int argc, char* argv[])
                 printf("Received [SIMPL] (from %s:%d): %.*s {%s}\n",
                        inet_ntoa(from_address.sin_addr),
                        htons(from_address.sin_port),
-                       (int)rcv_len, response.simpl.cmd,
+                       (int)rcv_len, response.head,
                        response.simpl.data);
 
                 // TODO: Watch out for more than one \n in a row.

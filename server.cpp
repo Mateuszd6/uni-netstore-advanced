@@ -1,7 +1,6 @@
 // TODO: Fix c headers!
 #include <assert.h>
 #include <arpa/inet.h>
-#include <cstdint>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
@@ -20,15 +19,8 @@ namespace fs = std::filesystem;
 namespace chrono = std::chrono;
 using namespace std::chrono_literals;
 
-// TODO: Move to common.
-using int8 = int8_t;
-using uint8 = uint8_t;
-using int16 = int16_t;
-using uint16 = uint16_t;
-using int32 = int32_t;
-using uint32 = uint32_t;
-using int64 = int64_t;
-using uint64 = uint64_t;
+#include "common.hpp"
+#include "cmd.hpp"
 
 struct server_options
 {
@@ -38,150 +30,6 @@ struct server_options
     std::optional<int32> cmd_port = {};
     std::optional<int32> timeout = 5;
 };
-
-#ifdef DEBUG
-#  define TRACE(...) fprintf(stderr, __VA_ARGS__)
-#else
-#  define TRACE(...) (void)0
-#endif
-
-// TODO: Make it legit
-#define syserr(WHY)                             \
-    do {                                        \
-        printf(WHY);                            \
-        exit(-1);                               \
-    } while (0)
-
-// TODO: Move to utils.
-constexpr static uint32 strhash(const char* str, int h = 0)
-{
-    // In c++17 std::hash is still not constexpr.
-    return !str[h] ? 5381 : (strhash(str, h + 1) * 33) ^ str[h];
-}
-
-// NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
-//       bytes (65535 - 8 byte UDP header - 20 byte IP header). ~Wikipedia.
-constexpr size_t upd_max_data_size = 65507;
-union cmd
-{
-    struct __attribute__((__packed__))
-    {
-        char head[10];
-        uint64 cmd_seq;
-
-        union {
-            struct __attribute__((__packed__))
-            {
-                uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
-            } simpl;
-
-            struct __attribute__((__packed__))
-            {
-                uint64 param;
-                uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
-
-                // Param property is only related to the cmplx part of the cmd,
-                // so we have to invoke it explicitly refering to it, so that it
-                // minimizes missuse chances.
-                uint64 get_param()
-                {
-                    return be64toh(param);
-                }
-
-                void set_param(uint64 val)
-                {
-                    param = htobe64(val);
-                }
-            } cmplx;
-        };
-    };
-
-    uint8 bytes[upd_max_data_size];
-
-    cmd()
-    {
-        clear();
-    }
-
-    cmd(char const* head_, uint64 cmd_seq_) : cmd()
-    {
-        set_head(head_);
-        set_cmd_seq(cmd_seq_);
-    }
-
-    char const* get_head()
-    {
-        return &(head[0]);
-    }
-
-    void set_head(char const* val)
-    {
-        int32 val_len = strlen(val);
-        assert(val_len <= 10);
-
-        bzero(head, 10);
-        memcpy(head, val, strlen(val));
-    }
-
-    uint64 get_cmd_seq()
-    {
-        return be64toh(cmd_seq);
-    }
-
-    void set_cmd_seq(uint64 val)
-    {
-        cmd_seq = htobe64(val);
-    }
-
-    bool check_header(char const* usr_head)
-    {
-        int32 usr_head_len = strlen(head);
-        assert(usr_head_len <= 10);
-
-        if (memcmp(head, usr_head, usr_head_len) != 0)
-            return false;
-
-        // The rest of the header must be filled with zeros, otherwise reject.
-        for (int i = usr_head_len; i < 10; ++i)
-            if (head[i] != 0)
-                return false;
-
-        return true;
-    }
-
-    void clear()
-    {
-        bzero(&bytes[0], upd_max_data_size);
-    }
-
-    // if expect_data is false, we make sure, that the whole data[] array is
-    // zeroed. Otherwise the packet is concidered to be ill formed.
-    bool validate(char const* expected_header,
-                  bool is_cmplx,
-                  bool expect_data) const
-    {
-        int32 exp_head_len = strlen(expected_header);
-        assert(exp_head_len <= 10);
-
-        if (memcmp(head, expected_header, exp_head_len) != 0)
-            return false;
-
-        // Check if the trailing bytes in the HEAD are set to 0.
-        for (int i = exp_head_len; i < 10; ++i)
-            if (head[i] != 0)
-                return false;
-
-        return true;
-    }
-};
-
-// Make sure that the cmd union is packed properly.
-#if 1
-static_assert(sizeof(cmd::bytes) == upd_max_data_size);
-static_assert(sizeof(cmd::bytes) == sizeof(cmd));
-static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::simpl));
-static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::cmplx));
-#endif
 
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
@@ -263,68 +111,6 @@ void handle_interrput(sig_t s){
 // TODO: CHECK macro!
 #define CHECK(X) X
 
-#if 0
-std::thread read_thread;
-bool read_thread_started = false;
-
-void read_file(int sock, sockaddr_in server_address) {
-    printf("Accepting clients on port %hu\n", ntohs(server_address.sin_port));
-
-    struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    if (setsockopt (sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0)
-        syserr("setsockopt failed\n");
-
-    // get client connection from the socket
-    sockaddr_in client_address;
-    socklen_t client_address_len = sizeof (client_address);
-    int msg_sock;
-    CHECK(msg_sock = accept(sock, (sockaddr *)&client_address, &client_address_len));
-
-
-    ssize_t read_bytes;
-    char buffer[1024];
-    while((read_bytes = read(msg_sock, buffer, 1024)) > 0)
-    {
-        printf("Got: '%.*s'\n", read_bytes, buffer);
-    }
-
-    printf("Cleaning up!\n");
-    close(msg_sock);
-    close(sock);
-}
-
-in_port_t open_fileupload_conn()
-{
-    int sock;
-    sockaddr_in server_address;
-    socklen_t server_address_len;
-
-    // Create an IPv4 socket.
-    CHECK((sock = socket(PF_INET, SOCK_STREAM, 0)));
-
-    // IPv4, all interfaces, and port taken from input data.
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address.sin_port = htons(3000);
-
-    // Bind the socket to a concrete address, and switch for listening.
-    CHECK(bind(sock, (sockaddr *)&server_address, server_address_len));
-
-    CHECK(listen(sock, SOMAXCONN));
-
-    in_port_t retval = server_address.sin_port;
-
-    if (read_thread_started)
-        read_thread.join();
-    read_thread = std::thread{read_file, sock, server_address};
-    read_thread_started = true;
-
-    return retval;
-}
-#else
-
 std::thread read_thread;
 bool read_thread_started = false;
 
@@ -394,7 +180,6 @@ void tcp_read_file(int sock)
     if (close(sock) < 0)
         syserr("close");
 }
-#endif
 
 int main(int argc, char const** argv)
 {
