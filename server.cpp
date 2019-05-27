@@ -359,7 +359,7 @@ std::pair<int, in_port_t> init_tcp_conn()
     return {sock, server_address.sin_port};
 }
 
-void tcp_start_conn(int sock)
+void tcp_read_file(int sock)
 {
     int msg_sock;
     struct DataStructure data_read;
@@ -376,26 +376,16 @@ void tcp_start_conn(int sock)
     if (msg_sock < 0)
         syserr("accept");
 
-    ssize_t prev_len = 0; // number of bytes already in the buffer
+    char buffer[1024];
     ssize_t len;
-    do {
-        ssize_t remains = sizeof(data_read) - prev_len; // number of bytes to be read
-        len = read(msg_sock, ((char*)&data_read) + prev_len, remains);
-        printf("Read some bytes\n");
-
-        if (len < 0)
+    while ((len = read(msg_sock, buffer, 1024)) != 0) {
+        if (len < 0) {
             syserr("reading from client socket");
-        else if (len>0) {
-            printf("read %zd bytes from socket\n", len);
-            prev_len += len;
-
-            if (prev_len == sizeof(data_read)) {
-                // we have received a whole structure
-                printf("received packet no %d: %u\n", ntohs(data_read.seq_no), ntohl(data_read.number));
-                prev_len = 0;
-            }
         }
-    } while (len > 0);
+        else if (len > 0) {
+            printf("read %zd bytes from socket: %.*s\n", len, (int)len, buffer);
+        }
+    }
 
     printf("ending connection\n");
     if (close(msg_sock) < 0)
@@ -555,7 +545,7 @@ int main(int argc, char const** argv)
                 printf("Listening on port %hu\n", ntohs(port));
                 if (read_thread_started)
                     read_thread.join();
-                read_thread = std::thread{tcp_start_conn, socket};
+                read_thread = std::thread{tcp_read_file, socket};
                 read_thread_started = true;
 
                 if (sendto(sock, response.bytes, sizeof(response), 0,
