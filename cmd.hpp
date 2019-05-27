@@ -1,6 +1,8 @@
 #ifndef CMD_HPP
 #define CMD_HPP
 
+#include <functional>
+
 #include "common.hpp"
 
 // NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
@@ -8,6 +10,12 @@
 constexpr size_t upd_max_data_size = 65507;
 union cmd
 {
+    constexpr static size_t common_header_size = 10  + sizeof(uint64);
+    constexpr static size_t simpl_max_data = upd_max_data_size - common_header_size;
+    constexpr static size_t cmplx_max_data = upd_max_data_size - common_header_size - sizeof(uint64);
+
+    // TODO: Concider changing chars to uint8's.
+    // TODO(IMPORTANT): Doing it with strlen is badd, because packets may contains 0s.
     struct __attribute__((__packed__))
     {
         char head[10];
@@ -16,17 +24,20 @@ union cmd
         union {
             struct __attribute__((__packed__))
             {
-                uint8 data[upd_max_data_size - 10 - sizeof(uint64)];
+                uint8 data[simpl_max_data];
+
+                uint8 const* get_data() const;
+                void set_data(uint8 const* val, size_t data_len);
             } simpl;
             struct __attribute__((__packed__))
             {
                 uint64 param;
-                uint8 data[upd_max_data_size - 10 - 2 * sizeof(uint64)];
+                uint8 data[cmplx_max_data];
 
-                // Param property is only related to the cmplx part of the cmd,
-                // so we have to invoke it explicitly refering to it, so that it
-                // minimizes missuse chances.
-                uint64 get_param();
+                uint8 const* get_data() const;
+                void set_data(uint8 const* val, size_t data_len);
+
+                uint64 get_param() const;
                 void set_param(uint64 val);
             } cmplx;
         };
@@ -34,7 +45,13 @@ union cmd
     uint8 bytes[upd_max_data_size];
 
     cmd();
-    cmd(char const* head_, uint64 cmd_seq_);
+
+    // These fucntions let us construct the response object and also return
+    // their size which is the number of bytes user has to send.
+    static std::pair<cmd, size_t> make_simpl(char const* head, uint64 cmd_seq,
+                                             uint8 const* data, size_t data_len);
+    static std::pair<cmd, size_t> make_cmplx(char const* head, uint64 cmd_seq,
+                                             uint64 param, uint8 const* data, size_t data_len);
 
     char const* get_head() const;
     void set_head(char const* val);

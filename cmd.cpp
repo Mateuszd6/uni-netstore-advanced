@@ -7,10 +7,31 @@ cmd::cmd()
     clear();
 }
 
-cmd::cmd(char const* head_, uint64 cmd_seq_) : cmd()
+std::pair<cmd, size_t>
+cmd::make_simpl(char const* head, uint64 cmd_seq,
+                uint8 const* data, size_t data_len)
 {
-    set_head(head_);
-    set_cmd_seq(cmd_seq_);
+    cmd retval{};
+
+    retval.set_head(head);
+    retval.set_cmd_seq(cmd_seq);
+    retval.simpl.set_data(data, data_len);
+
+    return { retval,  common_header_size + data_len };
+}
+
+std::pair<cmd, size_t>
+cmd::make_cmplx(char const* head, uint64 cmd_seq,
+                uint64 param_, uint8 const* data, size_t data_len)
+{
+    cmd retval{};
+
+    retval.set_head(head);
+    retval.set_cmd_seq(cmd_seq);
+    retval.cmplx.set_param(param_);
+    retval.cmplx.set_data(data, data_len);
+
+    return { retval,  common_header_size + data_len };
 }
 
 char const* cmd::get_head() const
@@ -39,7 +60,37 @@ void cmd::set_cmd_seq(uint64 val)
 
 // We need an alias to define a anonymus struct member func.
 using cmd_cmplx_t = decltype(cmd::cmplx);
-uint64 cmd_cmplx_t::get_param()
+using cmd_simpl_t = decltype(cmd::simpl);
+
+uint8 const* cmd_simpl_t::get_data() const
+{
+    return (uint8 const*)data;
+}
+
+void cmd_simpl_t::set_data(uint8 const* val, size_t data_len)
+{
+    // TODO: Test for equal
+    assert(data_len <= cmd::simpl_max_data);
+    memcpy(data, val, data_len);
+
+    // TODO: Zero out the rest of the structure?
+}
+
+uint8 const* cmd_cmplx_t::get_data() const
+{
+    return (uint8 const*)data;
+}
+
+void cmd_cmplx_t::set_data(uint8 const* val, size_t data_len)
+{
+    // TODO: Test for equal
+    assert(data_len <= cmd::simpl_max_data);
+    memcpy(data, val, data_len);
+
+    // TODO: Zero out the rest of the structure?
+}
+
+uint64 cmd_cmplx_t::get_param() const
 {
     return be64toh(param);
 }

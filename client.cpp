@@ -168,11 +168,11 @@ main(int argc, char* argv[])
     ssize_t rcv_len;
     for (i = 0; i < REPEAT_COUNT; ++i)
     {
-        cmd request{"LIST", 2};
-        memcpy(request.simpl.data, ".o", 2);
+        char const* filter = ".o";
+        auto[request, size] = cmd::make_simpl("HELLO", 2, (uint8 const*)filter, strlen(filter));
+
         printf("Sending request...\n");
-        if (sendto(sock, request.bytes, sizeof(request), 0,
-                   (sockaddr*)&remote_address, sizeof(remote_address)) != sizeof(request))
+        if (sendto(sock, request.bytes, 256, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != 256)
         {
             syserr("write");
         }

@@ -10,10 +10,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <fstream>
 #include <algorithm>
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 namespace fs = std::filesystem;
@@ -31,6 +33,12 @@ struct server_options
     std::optional<int32> cmd_port = {};
     std::optional<int32> timeout = 5;
 };
+
+// we will use this mutex to make sure, that only one thread is accessing the
+// folder, modifiying the capacity size, etc.
+static std::mutex fs_mutex{};
+static fs::path current_folder;
+static ssize_t current_space = 0;
 
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
@@ -115,10 +123,58 @@ void handle_interrput(sig_t s){
 std::thread read_thread;
 bool read_thread_started = false;
 
-struct __attribute__((__packed__)) DataStructure {
-  uint16_t seq_no;
-  uint32_t number;
-};
+// Valid path is one that does not contain '/' and has size > 0. TODO: What about ../foo.txt
+bool sanitize_path(std::string const& filename)
+{
+    return (filename.size() > 0 && filename.find('/') == std::string::npos);
+}
+
+void index_files(int64 max_space)
+{
+    // TODO: We dont really need a mutex here...
+    std::lock_guard<std::mutex> m{fs_mutex};
+
+    current_space = max_space;
+    int64 total_size = 0;
+    for (auto&& entry : fs::directory_iterator(current_folder))
+        if (entry.is_regular_file())
+        {
+            TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
+            total_size += entry.file_size();
+        }
+
+    current_space -= total_size;
+    TRACE("Total size: %ld\n", total_size);
+    TRACE("Space left: %ld\n", current_space);
+}
+
+// This assumes that the filename is valid.
+bool try_alloc_file(std::string const& filename, size_t size)
+{
+    std::lock_guard<std::mutex> m{fs_mutex};
+    fs::path file_path = current_folder / filename;
+
+    if (current_space < size)
+    {
+        printf("ERROR: File tooo big!!!\n");
+        return false;
+    }
+
+    if (fs::exists(file_path))
+    {
+        printf("ERROR: File exists!\n");
+        return false;
+    }
+
+    // As we succeeded we must subscrat the file size from the server pool.
+    current_space -= size;
+
+    std::ofstream ofs(file_path);
+    ofs << "Dummy";
+    ofs.close();
+
+    return true;
+}
 
 std::pair<int, in_port_t> init_tcp_conn()
 {
@@ -149,7 +205,6 @@ std::pair<int, in_port_t> init_tcp_conn()
 void tcp_read_file(int sock)
 {
     int msg_sock;
-    struct DataStructure data_read;
     struct sockaddr_in client_address;
     socklen_t client_address_len = sizeof(client_address);;
 
@@ -204,17 +259,11 @@ int main(int argc, char const** argv)
     // Create a folder if it does not exists already.
     // TODO: Check the output and fail miserably on error.
     fs::create_directories(so.shrd_fldr.value().c_str());
+    current_folder = fs::path{so.shrd_fldr.value()};
 
-    int64 total_size = 0;
-    for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
-        if (entry.is_regular_file())
-        {
-            TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
-            total_size += entry.file_size();
-        }
-    TRACE("Total size: %ld\n", total_size);
-    so.max_space.value() -= total_size;
-    TRACE("Space left: %ld\n", so.max_space.value());
+    index_files(so.max_space.value());
+
+    try_alloc_file("hello.jpg", 5);
 
     // SERVER STUFF: (TODO: Move away!)
     // argumenty wywołania programu
@@ -225,7 +274,7 @@ int main(int argc, char const** argv)
     int sock;
     struct sockaddr_in local_address, remote_address;
     struct ip_mreq ip_mreq;
-    unsigned int remote_len;
+    unsigned int remote_len = sizeof(remote_address);
 
     // zmienne obsługujące komunikację
     ssize_t rcv_len;
@@ -272,17 +321,21 @@ int main(int argc, char const** argv)
             {
                 printf("Received msg: HELLO\n");
 
-                cmd response{"GOOD_DAY", c.cmd_seq};
-                response.cmplx.set_param(so.max_space.value());
-                memcpy(response.cmplx.data, so.mcast_addr.value().c_str(), so.mcast_addr.value().size());
+                auto[response, size] = cmd::make_simpl("GOOD_DAY",
+                                                       c.cmd_seq,
+                                                       (uint8 const*)(so.mcast_addr.value().c_str()),
+                                                       strlen(so.mcast_addr.value().c_str()));
 
-                printf("Responding to: %s:%d\n",
-                       inet_ntoa(remote_address.sin_addr),
-                       htons(remote_address.sin_port));
-                if (sendto(sock, response.bytes, sizeof(response), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
+                printf("Responding to: %s:%d (%lu bytes)\n",
+                       inet_ntoa(remote_address.sin_addr), htons(remote_address.sin_port), size);
+                if (sendto(sock, response.bytes, size, 0, (struct sockaddr*)&remote_address, remote_len) == -1)
+                {
                     syserr("sendto");
+                }
                 else
+                {
                     printf("Sent msg: [%.*s]\n", 10, response.head);
+                }
             }
             else if (c.check_header("LIST"))
             {
@@ -291,8 +344,6 @@ int main(int argc, char const** argv)
 
                 // TODO: Decide what happend when rcv'ed: "FOO\0\0BAR"
                 std::string pattern{(char const*)c.simpl.data};
-
-                cmd response{"MY_LIST", c.cmd_seq};
                 std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
                 for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
                     if (entry.is_regular_file())
@@ -317,7 +368,11 @@ int main(int argc, char const** argv)
                 // TODO: Handle the case, when these are greater.
                 assert(filenames.size() <= sizeof(cmd::simpl));
                 printf("Filenames: {%s}\n", filenames.c_str());
-                memcpy(response.simpl.data, filenames.c_str(), filenames.size());
+
+                auto[response, size] = cmd::make_simpl("MY_LIST",
+                                                       c.cmd_seq,
+                                                       (uint8 const*)(filenames.c_str()),
+                                                       filenames.size());
 
                 printf("Responding to: %s:%d\n",
                        inet_ntoa(remote_address.sin_addr),
@@ -330,7 +385,7 @@ int main(int argc, char const** argv)
             }
             else if (c.check_header("GET"))
             {
-                // TODO: Make sure that DATA is _NOT_ empty -> cannot have an empty filename.
+                // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
                 printf("Received msg: GET\n");
                 printf("Adding file: %s\n", c.cmplx.data);
 
@@ -339,8 +394,14 @@ int main(int argc, char const** argv)
                 // The init happens in the main thread so that we know the port
                 // id. Then we start a new thread giving it a created socket.
                 auto[socket, port] = init_tcp_conn();
-                cmd response{"CONNECT_ME", c.cmd_seq};
-                response.cmplx.set_param(ntohs(port));
+
+                // TODO: CHeck this part we are sending int16 in a field for int64.
+                auto[response, size] = cmd::make_cmplx("CONNECT_ME",
+                                                       c.cmd_seq,
+                                                       ntohs(port),
+                                                       c.cmplx.data,
+                                                       strlen((char const*)c.cmplx.data));
+
                 printf("Listening on port %hu\n", ntohs(port));
                 if (read_thread_started)
                     read_thread.join();
