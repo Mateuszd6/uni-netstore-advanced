@@ -168,8 +168,8 @@ main(int argc, char* argv[])
     ssize_t rcv_len;
     for (i = 0; i < REPEAT_COUNT; ++i)
     {
-        char const* filter = ".o";
-        auto[request, size] = cmd::make_simpl("HELLO", 2, (uint8 const*)filter, strlen(filter));
+        char const* filter = "hello.jpg";
+        auto[request, size] = cmd::make_simpl("GET", 2, (uint8 const*)filter, strlen(filter));
 
         printf("Sending request...\n");
         if (sendto(sock, request.bytes, 256, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != 256)
@@ -219,7 +219,7 @@ main(int argc, char* argv[])
             else if (rcv_len > 0)
             {
                 printf("Time difference: %lu\n", time_diff.count());
-#if 0
+#if 1
                 printf("Received [CMPLX] (from %s:%d): %.*s %lu {%s}\n",
                        inet_ntoa(from_address.sin_addr),
                        htons(from_address.sin_port),
@@ -248,9 +248,6 @@ main(int argc, char* argv[])
                     while (*p && *p != '\n')
                         ++p;
 
-#if 0
-                    printf("ENTRY: %.*s\n", p - str, (char const*)(str));
-#endif
                     last_search_result.emplace_back(
                         search_entry{std::string{(char const*)str, (size_t)(p - str)},
                                      from_address.sin_addr});

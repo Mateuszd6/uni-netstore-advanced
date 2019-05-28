@@ -148,6 +148,33 @@ void index_files(int64 max_space)
     TRACE("Space left: %ld\n", current_space);
 }
 
+// If file exists this will load its contents into the vector and return (true,
+// contents) pair, otherwise (false, _) is returned, where _ could be anything.
+std::pair<bool, std::vector<uint8>>
+load_file_if_exists(char const* filename)
+{
+    fs::path file_path = current_folder / filename;
+    std::vector<uint8> contents{};
+
+    std::lock_guard<std::mutex> m{fs_mutex};
+    if (fs::exists(file_path))
+    {
+        std::ifstream file{file_path};
+        char buffer[4096];
+
+        assert(file.is_open());
+        while (!(file.eof() || file.fail())) {
+            file.read(buffer, 1024);
+            contents.reserve(contents.size() + file.gcount());
+            contents.insert(contents.end(), buffer, buffer + file.gcount());
+        }
+
+        return {true, contents};
+    }
+
+    return {false, contents};
+}
+
 // This assumes that the filename is valid.
 bool try_alloc_file(std::string const& filename, size_t size)
 {
@@ -202,7 +229,7 @@ std::pair<int, in_port_t> init_tcp_conn()
     return {sock, server_address.sin_port};
 }
 
-void tcp_read_file(int sock)
+void tcp_read_file(int sock, char const* filename)
 {
     int msg_sock;
     struct sockaddr_in client_address;
@@ -212,7 +239,6 @@ void tcp_read_file(int sock)
     if (listen(sock, 5) < 0)
         syserr("listen");
 
-
     // get client connection from the socket
     msg_sock = accept(sock, (struct sockaddr *) &client_address, &client_address_len);
     if (msg_sock < 0)
@@ -220,6 +246,7 @@ void tcp_read_file(int sock)
 
     char buffer[1024];
     ssize_t len;
+    ssize_t read_total;
     while ((len = read(msg_sock, buffer, 1024)) != 0) {
         if (len < 0) {
             syserr("reading from client socket");
@@ -387,9 +414,10 @@ int main(int argc, char const** argv)
             {
                 // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
                 printf("Received msg: GET\n");
-                printf("Adding file: %s\n", c.cmplx.data);
+                printf("Requested a file: %s\n", c.simpl.data);
 
-                // TODO: Check if such file exists.
+                auto[exists, content] = load_file_if_exists((char const*)c.simpl.data);
+                printf("--> File %s\n", exists ?  "exists" : "does not exist");
 
                 // The init happens in the main thread so that we know the port
                 // id. Then we start a new thread giving it a created socket.
@@ -399,13 +427,13 @@ int main(int argc, char const** argv)
                 auto[response, size] = cmd::make_cmplx("CONNECT_ME",
                                                        c.cmd_seq,
                                                        ntohs(port),
-                                                       c.cmplx.data,
-                                                       strlen((char const*)c.cmplx.data));
+                                                       c.simpl.data,
+                                                       strlen((char const*)c.simpl.data));
 
                 printf("Listening on port %hu\n", ntohs(port));
                 if (read_thread_started)
                     read_thread.join();
-                read_thread = std::thread{tcp_read_file, socket};
+                read_thread = std::thread{tcp_read_file, socket, (char const*)c.simpl.data};
                 read_thread_started = true;
 
                 if (sendto(sock, response.bytes, sizeof(response), 0,
