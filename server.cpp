@@ -213,8 +213,8 @@ load_file_if_exists(char const* filename)
 // This assumes that the filename is valid.
 bool try_alloc_file(std::string const& filename, size_t size)
 {
-    std::lock_guard<std::mutex> m{fs_mutex};
     fs::path file_path = current_folder / filename;
+    std::lock_guard<std::mutex> m{fs_mutex};
 
     if (current_space < size)
     {
@@ -241,6 +241,21 @@ bool try_alloc_file(std::string const& filename, size_t size)
     current_space -= size;
 
     return true;
+}
+
+// TODO: Should we remember files we've saved, or should we just just filesystem
+//       to do that?
+bool try_delete_file(std::string const& filename)
+{
+    fs::path file_path = current_folder / filename;
+    std::lock_guard<std::mutex> m{fs_mutex};
+
+    bool retval = fs::remove(file_path);
+
+    if (!retval)
+        printf("ERROR: File exists!\n");
+
+    return retval;
 }
 
 std::pair<int, in_port_t> init_tcp_conn()
@@ -322,14 +337,15 @@ static void handle_request_hello(int sock,
         return;
     }
 
-    auto[response, size] = cmd::make_simpl(
+    auto[response, size] = cmd::make_cmplx(
         "GOOD_DAY",
-        request.cmd_seq,
+        request.get_cmd_seq(),
+        current_space,
         (uint8 const*)(so.mcast_addr.value().c_str()),
         strlen(so.mcast_addr.value().c_str()));
 
-    printf("Responding with: %.*s %lu (%lu bytes)\n",
-           10, response.head, response.cmd_seq, size);
+    printf("Responding with: %.*s %lu %lu (%lu bytes)\n",
+           10, response.head, response.get_cmd_seq(), response.cmplx.get_param(), size);
 
     if (sendto(sock, response.bytes, size, 0,
                (sockaddr*)&remote_addr, remote_addr_len) != size)
@@ -390,12 +406,12 @@ static void handle_request_list(int sock,
     {
         auto[response, size] = cmd::make_simpl(
             "MY_LIST",
-            request.cmd_seq,
+            request.get_cmd_seq(),
             (uint8 const*)(fnames_chunk.c_str()),
             fnames_chunk.size());
 
         printf("Responding with: %.*s %lu (%lu bytes)\n",
-               10, response.head, response.cmd_seq, size);
+               10, response.head, response.get_cmd_seq(), size);
 
         if (sendto(sock, response.bytes, size, 0,
                    (sockaddr*)&remote_addr, remote_addr_len) != size)
@@ -415,10 +431,42 @@ static void handle_request_get(int sock,
            ntohs(remote_addr.sin_port),
            "GET");
 
-    // TODO: What if the data is empty?
     if (!request.validate("GET", false, true)) {
         printf("INVALID REQUEST\n");
         return;
+    }
+
+    // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
+
+    printf("Requested a file: %s\n", request.simpl.data);
+
+    // This check and fileload is atomic. We either load the whole file at once
+    // if it exists, or we report that it is missing.
+    auto[exists, content] = load_file_if_exists((char const*)request.simpl.data);
+    printf("--> File %s\n", exists ?  "exists" : "does not exist");
+
+    // The init happens in the main thread so that we know the port
+    // id. Then we start a new thread giving it a created socket.
+    auto[socket, port] = init_tcp_conn();
+
+    // TODO: CHeck this part we are sending int16 in a field for int64.
+    auto[response, size] = cmd::make_cmplx(
+        "CONNECT_ME",
+        request.get_cmd_seq(),
+        ntohs(port), // TODO: Look closer into when this value is BE and when LE.
+        request.simpl.data,
+        strlen((char const*)request.simpl.data));
+
+    printf("Listening on port %hu\n", ntohs(port));
+    if (read_thread_started)
+        read_thread.join();
+    read_thread = std::thread{tcp_read_file, socket, (char const*)request.simpl.data};
+    read_thread_started = true;
+
+    if (sendto(sock, response.bytes, size, 0,
+               (sockaddr*)&remote_addr, remote_addr_len) != size)
+    {
+        syserr("sendto");
     }
 }
 
@@ -438,6 +486,55 @@ static void handle_request_add(int sock,
         printf("INVALID REQUEST\n");
         return;
     }
+
+    // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
+
+    printf("Adding a file: %s\n", request.simpl.data);
+
+
+    if (try_alloc_file((char const*)request.cmplx.data, request.cmplx.get_param()))
+    {
+        // The init happens in the main thread so that we know the port
+        // id. Then we start a new thread giving it a created socket.
+        auto[socket, port] = init_tcp_conn();
+
+        printf("Listening on port %hu\n", ntohs(port));
+        if (read_thread_started)
+            read_thread.join();
+        read_thread = std::thread{tcp_read_file, socket, (char const*)request.simpl.data};
+        read_thread_started = true;
+
+        // TODO: Check this part we are sending int16 in a field for int64.
+        auto[response, size] = cmd::make_cmplx(
+            "CAN_ADD",
+            request.get_cmd_seq(),
+            ntohs(port), // TODO: Look closer into when this value is BE and when LE.
+            request.cmplx.data,
+            strlen((char const*)request.cmplx.data));
+
+        if (sendto(sock, response.bytes, size, 0,
+                   (sockaddr*)&remote_addr, remote_addr_len) != size)
+        {
+            syserr("sendto");
+        }
+    }
+    else
+    {
+        printf("Could not add a file\n");
+
+        // TODO: Check this part we are sending int16 in a field for int64.
+        auto[response, size] = cmd::make_simpl(
+            "NO_WAY",
+            request.get_cmd_seq(),
+            request.cmplx.data,
+            strlen((char const*)request.cmplx.data));
+
+        if (sendto(sock, response.bytes, size, 0,
+                   (sockaddr*)&remote_addr, remote_addr_len) != size)
+        {
+            syserr("sendto");
+        }
+    }
 }
 
 static void handle_request_del(int sock,
@@ -455,6 +552,11 @@ static void handle_request_del(int sock,
         printf("INVALID REQUEST\n");
         return;
     }
+
+    // TODO: Sanitize path!!
+
+    printf("Removing file %s\n", request.simpl.data);
+    try_delete_file((char const*)request.simpl.data);
 }
 
 int main(int argc, char const** argv)
@@ -482,8 +584,6 @@ int main(int argc, char const** argv)
     current_folder = fs::path{so.shrd_fldr.value()};
 
     index_files(so.max_space.value());
-
-    try_alloc_file("hello.jpg", 5);
 
     // SERVER STUFF: (TODO: Move away!)
     // argumenty wywołania programu
@@ -547,39 +647,15 @@ int main(int argc, char const** argv)
             }
             else if (c.check_header("GET"))
             {
-                // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
-                printf("Received msg: GET\n");
-                printf("Requested a file: %s\n", c.simpl.data);
-
-                auto[exists, content] = load_file_if_exists((char const*)c.simpl.data);
-                printf("--> File %s\n", exists ?  "exists" : "does not exist");
-
-                // The init happens in the main thread so that we know the port
-                // id. Then we start a new thread giving it a created socket.
-                auto[socket, port] = init_tcp_conn();
-
-                // TODO: CHeck this part we are sending int16 in a field for int64.
-                auto[response, size] = cmd::make_cmplx("CONNECT_ME",
-                                                       c.cmd_seq,
-                                                       ntohs(port),
-                                                       c.simpl.data,
-                                                       strlen((char const*)c.simpl.data));
-
-                printf("Listening on port %hu\n", ntohs(port));
-                if (read_thread_started)
-                    read_thread.join();
-                read_thread = std::thread{tcp_read_file, socket, (char const*)c.simpl.data};
-                read_thread_started = true;
-
-                if (sendto(sock, response.bytes, sizeof(response), 0,
-                           (struct sockaddr*)&remote_address, remote_len) == -1)
-                {
-                    syserr("sendto");
-                }
-                else
-                {
-                    printf("Sent msg: [%.*s]\n", 10, response.head);
-                }
+                handle_request_get(sock, c, remote_address, remote_len);
+            }
+            else if (c.check_header("ADD"))
+            {
+                handle_request_add(sock, c, remote_address, remote_len);
+            }
+            else if (c.check_header("DEL"))
+            {
+                handle_request_del(sock, c, remote_address, remote_len);
             }
             else
             {

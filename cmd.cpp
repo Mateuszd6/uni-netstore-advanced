@@ -35,7 +35,7 @@ cmd::make_cmplx(char const* head, uint64 cmd_seq,
     if (data != nullptr)
         retval.cmplx.set_data(data, data_len);
 
-    return { retval,  common_header_size + data_len };
+    return { retval,  common_header_size + sizeof(uint64) + data_len };
 }
 
 char const* cmd::get_head() const
