@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
+#include <iostream>
 #include <vector>
 #include <random>
 #include <string>
@@ -320,46 +321,64 @@ main(int argc, char** argv)
     timeval tv = chrono_to_posix(5s);
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
 
-    // --
+    for (;;)
     {
-        auto[request, size] = cmd::make_simpl("HELLO", 2, 0, 0);
-        printf("Sending request...\n");
-        if (sendto(sock, request.bytes, size, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != size)
+        std::string input_line;
+        std::getline(std::cin, input_line);
+
+        std::string_view command{};
+        std::string_view param{};
+
+        size_t space_occur = input_line.find(" ");
+        if (space_occur == std::string::npos)
         {
-            syserr("sendto");
+            command = std::string_view{input_line};
         }
-        available_servers.clear();
-        await_responses(sock, "GOOD_DAY", 2, handle_response_hello);
-        for (auto&& i : available_servers)
+        else
         {
+            command = std::string_view{input_line.c_str(), space_occur};
+            param = std::string_view{input_line.c_str() + space_occur + 1};
+        }
+
+        std::cout << "command is: '" << command
+                  << "', param is: '" << param << "'\n";
+
+        if (command == "discover")
+        {
+            auto[request, size] = cmd::make_simpl("HELLO", 2, 0, 0);
+            printf("Sending request...\n");
+            if (sendto(sock, request.bytes, size, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != size)
+            {
+                syserr("sendto");
+            }
+            available_servers.clear();
+            await_responses(sock, "GOOD_DAY", 2, handle_response_hello);
+            for (auto&& i : available_servers)
+            {
+                printf("\033[1;32m");
+                std::string uaddr = inet_ntoa(i.uaddr);
+                std::string maddr = inet_ntoa(i.maddr);
+                printf("Found %s (%s) with free space %lu\n", uaddr.c_str(), maddr.c_str(), i.free_space);
+                printf("\033[0m");
+            }
+        }
+        else if (command == "search")
+        {
+            auto[request, size] = cmd::make_simpl("LIST", 3, (uint8 const*)param.data(), param.size());
+            printf("Sending request...\n");
+            if (sendto(sock, request.bytes, size, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != size)
+            {
+                syserr("sendto");
+            }
+            last_search_result.clear();
+            await_responses(sock, "MY_LIST", 3, handle_response_list);
+
             printf("\033[1;32m");
-            std::string uaddr = inet_ntoa(i.uaddr);
-            std::string maddr = inet_ntoa(i.maddr);
-            printf("Found %s (%s) with free space %lu\n", uaddr.c_str(), maddr.c_str(), i.free_space);
+            for (auto&& i : last_search_result)
+                printf("%s (%s)\n", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
             printf("\033[0m");
         }
     }
-    // --
-
-    // --
-    {
-        char const* filter = ".o";
-        auto[request, size] = cmd::make_simpl("LIST", 3, (uint8*)filter, strlen(filter));
-        printf("Sending request...\n");
-        if (sendto(sock, request.bytes, size, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != size)
-        {
-            syserr("sendto");
-        }
-        last_search_result.clear();
-        await_responses(sock, "MY_LIST", 3, handle_response_list);
-
-        printf("\033[1;32m");
-        for (auto&& i : last_search_result)
-            printf("%s (%s)\n", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
-        printf("\033[0m");
-    }
-    // --
-
 
 #if 0
     // TODO: If timeout should errno be set to ETIMEDOUT..? It returns EAGAIN!!!
