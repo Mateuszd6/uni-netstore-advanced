@@ -1,4 +1,3 @@
-// TODO: Fix c headers!
 #include <cassert>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -151,6 +150,38 @@ void index_files(int64 max_space)
     TRACE("Space left: %ld\n", current_space);
 }
 
+// This function will not split the filenames so that they do not exceed udp msg
+// size. The reason is because it runs under the mutex, so we don't want it to
+// waste more time.
+std::string make_filenames_list(std::string const& pattern)
+{
+    std::lock_guard<std::mutex> m{fs_mutex};
+
+    // TODO: Decide what happend when pattern is like: "A\0B"
+    std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
+    for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
+        if (entry.is_regular_file())
+        {
+            std::string filename = entry.path().filename();
+            if (pattern.size() > 0 &&
+                std::search(filename.begin(), filename.end(),
+                            pattern.begin(), pattern.end()) == filename.end())
+            {
+                // We _didn't_ find patter, so we skip.
+                continue;
+            }
+
+            TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
+
+            // If there were some entries before, split them with \n.
+            if (filenames.size() > 0)
+                filenames.append("\n");
+            filenames.append(filename.c_str());
+        }
+
+    return filenames;
+}
+
 // If file exists this will load its contents into the vector and return (true,
 // contents) pair, otherwise (false, _) is returned, where _ could be anything.
 std::pair<bool, std::vector<uint8>>
@@ -162,12 +193,13 @@ load_file_if_exists(char const* filename)
     std::lock_guard<std::mutex> m{fs_mutex};
     if (fs::exists(file_path))
     {
+        constexpr static size_t buffer_size = 4096;
         std::ifstream file{file_path};
-        char buffer[4096];
+        char buffer[buffer_size];
 
         assert(file.is_open());
         while (!(file.eof() || file.fail())) {
-            file.read(buffer, 1024);
+            file.read(buffer, buffer_size);
             contents.reserve(contents.size() + file.gcount());
             contents.insert(contents.end(), buffer, buffer + file.gcount());
         }
@@ -255,11 +287,14 @@ void tcp_read_file(int sock, char const* filename)
     char buffer[1024];
     ssize_t len;
     ssize_t read_total;
-    while ((len = read(msg_sock, buffer, 1024)) != 0) {
-        if (len < 0) {
+    while ((len = read(msg_sock, buffer, 1024)) != 0)
+    {
+        if (len < 0)
+        {
             syserr("reading from client socket");
         }
-        else if (len > 0) {
+        else if (len > 0)
+        {
             printf("read %zd bytes from socket: %.*s\n", len, (int)len, buffer);
         }
     }
@@ -316,6 +351,57 @@ static void handle_request_list(int sock,
     if (!request.validate("LIST", false, true)) {
         printf("INVALID REQUEST\n");
         return;
+    }
+
+    std::string filenames = make_filenames_list((char const*)request.simpl.data);
+    std::vector<std::string> fnames_splited{};
+    char const* delim = "\n";
+    auto prev = filenames.begin();
+    do {
+        auto find = std::search(prev, filenames.end(), delim, delim + 1);
+        size_t entry_len = find - prev;
+
+        // Check if we have to create a new entry.
+        if (fnames_splited.empty() ||
+            fnames_splited.back().size() + 1 + entry_len > sizeof(cmd::simpl.data))
+        {
+            fnames_splited.emplace_back(prev, find);
+        }
+        else
+        {
+            fnames_splited.back().push_back('\n');
+            std::copy(prev, find, std::back_inserter(fnames_splited.back()));
+        }
+
+        prev = find;
+    } while (prev++ != filenames.end());
+
+    printf("FNAMES, CHOPPED:\n");
+    for (auto&& i : fnames_splited)
+        printf("{%s}\n", i.c_str());
+
+    printf("Which is %lu packets\n", fnames_splited.size());
+
+    // TODO: Handle the case, when these are greater.
+    // assert(filenames.size() <= sizeof(cmd::simpl));
+    // printf("Filenames: {%s}\n", filenames.c_str());
+
+    for (auto&& fnames_chunk : fnames_splited)
+    {
+        auto[response, size] = cmd::make_simpl(
+            "MY_LIST",
+            request.cmd_seq,
+            (uint8 const*)(fnames_chunk.c_str()),
+            fnames_chunk.size());
+
+        printf("Responding with: %.*s %lu (%lu bytes)\n",
+               10, response.head, response.cmd_seq, size);
+
+        if (sendto(sock, response.bytes, size, 0,
+                   (sockaddr*)&remote_addr, remote_addr_len) != size)
+        {
+            syserr("sendto");
+        }
     }
 }
 
@@ -457,49 +543,7 @@ int main(int argc, char const** argv)
             }
             else if (c.check_header("LIST"))
             {
-                // TODO: Make sure that DATA is empty!
-                printf("Received msg: LIST\n");
-
-                // TODO: Decide what happend when rcv'ed: "FOO\0\0BAR"
-                std::string pattern{(char const*)c.simpl.data};
-                std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
-                for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
-                    if (entry.is_regular_file())
-                    {
-                        std::string filename = entry.path().filename();
-                        if (pattern.size() > 0 &&
-                            std::search(filename.begin(), filename.end(),
-                                        pattern.begin(), pattern.end()) == filename.end())
-                        {
-                            // We _didn't_ find patter, so we skip.
-                            continue;
-                        }
-
-                        TRACE("%s -> %ld\n", entry.path().c_str(), entry.file_size());
-
-                        // If there were some entries before, split them with \n.
-                        if (filenames.size() > 0)
-                            filenames.append("\n");
-                        filenames.append(filename.c_str());
-                    }
-
-                // TODO: Handle the case, when these are greater.
-                assert(filenames.size() <= sizeof(cmd::simpl));
-                printf("Filenames: {%s}\n", filenames.c_str());
-
-                auto[response, size] = cmd::make_simpl("MY_LIST",
-                                                       c.cmd_seq,
-                                                       (uint8 const*)(filenames.c_str()),
-                                                       filenames.size());
-
-                printf("Responding to: %s:%d\n",
-                       inet_ntoa(remote_address.sin_addr),
-                       htons(remote_address.sin_port));
-
-                if (sendto(sock, response.bytes, sizeof(response), 0, (struct sockaddr*)&remote_address, remote_len) == -1)
-                    syserr("sendto");
-                else
-                    printf("Sent msg: [%.*s]\n", 10, response.head);
+                handle_request_list(sock, c, remote_address, remote_len);
             }
             else if (c.check_header("GET"))
             {

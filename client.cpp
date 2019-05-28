@@ -169,7 +169,7 @@ main(int argc, char* argv[])
     for (i = 0; i < REPEAT_COUNT; ++i)
     {
         char const* filter = "hello.jpg";
-        auto[request, size] = cmd::make_simpl("HELLO", 2, 0, 0); // (uint8 const*)filter, strlen(filter));
+        auto[request, size] = cmd::make_simpl("LIST", 2, 0, 0); // (uint8 const*)filter, strlen(filter));
 
         printf("Sending request...\n");
         if (sendto(sock, request.bytes, 256, 0, (sockaddr*)&remote_address, sizeof(remote_address)) != 256)
