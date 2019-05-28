@@ -15,7 +15,9 @@ cmd::make_simpl(char const* head, uint64 cmd_seq,
 
     retval.set_head(head);
     retval.set_cmd_seq(cmd_seq);
-    retval.simpl.set_data(data, data_len);
+
+    if (data != nullptr)
+        retval.simpl.set_data(data, data_len);
 
     return { retval,  common_header_size + data_len };
 }
@@ -29,7 +31,9 @@ cmd::make_cmplx(char const* head, uint64 cmd_seq,
     retval.set_head(head);
     retval.set_cmd_seq(cmd_seq);
     retval.cmplx.set_param(param_);
-    retval.cmplx.set_data(data, data_len);
+
+    if (data != nullptr)
+        retval.cmplx.set_data(data, data_len);
 
     return { retval,  common_header_size + data_len };
 }
@@ -137,6 +141,22 @@ bool cmd::validate(char const* expected_header,
     for (int i = exp_head_len; i < 10; ++i)
         if (head[i] != 0)
             return false;
+
+    if (!expect_data)
+    {
+        if (is_cmplx)
+        {
+            for (int  i = 0; i < cmplx_max_data; ++i)
+                if (cmplx.data[i] != 0)
+                    return false;
+        }
+        else
+        {
+            for (int  i = 0; i < simpl_max_data; ++i)
+                if (simpl.data[i] != 0)
+                    return false;
+        }
+    }
 
     return true;
 }

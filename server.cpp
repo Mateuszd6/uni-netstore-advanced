@@ -40,6 +40,9 @@ static std::mutex fs_mutex{};
 static fs::path current_folder;
 static ssize_t current_space = 0;
 
+// global server options.
+static server_options so;
+
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
 {
@@ -194,11 +197,16 @@ bool try_alloc_file(std::string const& filename, size_t size)
     }
 
     // As we succeeded we must subscrat the file size from the server pool.
-    current_space -= size;
+    std::ofstream ofs{file_path};
+    if (ofs.fail())
+    {
+        printf("ERROR: Could not create a file!\n");
+        return false;
+    }
 
-    std::ofstream ofs(file_path);
     ofs << "Dummy";
     ofs.close();
+    current_space -= size;
 
     return true;
 }
@@ -264,6 +272,105 @@ void tcp_read_file(int sock, char const* filename)
         syserr("close");
 }
 
+static void handle_request_hello(int sock,
+                                 cmd const& request,
+                                 sockaddr_in remote_addr,
+                                 size_t remote_addr_len)
+{
+    printf("Got (from %s:%d): [%s]\n",
+           inet_ntoa(remote_addr.sin_addr),
+           ntohs(remote_addr.sin_port),
+           "HELLO");
+
+    if (!request.validate("HELLO", false, false)) {
+        printf("INVALID REQUEST\n");
+        return;
+    }
+
+    auto[response, size] = cmd::make_simpl(
+        "GOOD_DAY",
+        request.cmd_seq,
+        (uint8 const*)(so.mcast_addr.value().c_str()),
+        strlen(so.mcast_addr.value().c_str()));
+
+    printf("Responding with: %.*s %lu (%lu bytes)\n",
+           10, response.head, response.cmd_seq, size);
+
+    if (sendto(sock, response.bytes, size, 0,
+               (sockaddr*)&remote_addr, remote_addr_len) != size)
+    {
+        syserr("sendto");
+    }
+}
+
+static void handle_request_list(int sock,
+                                cmd const& request,
+                                sockaddr_in remote_addr,
+                                size_t remote_addr_len)
+{
+    printf("Got (from %s:%d): [%s]\n",
+           inet_ntoa(remote_addr.sin_addr),
+           ntohs(remote_addr.sin_port),
+           "LIST");
+
+    if (!request.validate("LIST", false, true)) {
+        printf("INVALID REQUEST\n");
+        return;
+    }
+}
+
+static void handle_request_get(int sock,
+                               cmd const& request,
+                               sockaddr_in remote_addr,
+                               size_t remote_addr_len)
+{
+    printf("Got (from %s:%d): [%s]\n",
+           inet_ntoa(remote_addr.sin_addr),
+           ntohs(remote_addr.sin_port),
+           "GET");
+
+    // TODO: What if the data is empty?
+    if (!request.validate("GET", false, true)) {
+        printf("INVALID REQUEST\n");
+        return;
+    }
+}
+
+static void handle_request_add(int sock,
+                               cmd const& request,
+                               sockaddr_in remote_addr,
+                               size_t remote_addr_len)
+{
+    printf("Got (from %s:%d): [%s] %lu\n",
+           inet_ntoa(remote_addr.sin_addr),
+           ntohs(remote_addr.sin_port),
+           "ADD",
+           request.cmplx.get_param());
+
+    // TODO: What if the data is empty?
+    if (!request.validate("ADD", true, true)) {
+        printf("INVALID REQUEST\n");
+        return;
+    }
+}
+
+static void handle_request_del(int sock,
+                               cmd const& request,
+                               sockaddr_in remote_addr,
+                               size_t remote_addr_len)
+{
+    printf("Got (from %s:%d): [%s]\n",
+           inet_ntoa(remote_addr.sin_addr),
+           ntohs(remote_addr.sin_port),
+           "DEL");
+
+    // TODO: What if the data is empty?
+    if (!request.validate("DEL", false, true)) {
+        printf("INVALID REQUEST\n");
+        return;
+    }
+}
+
 int main(int argc, char const** argv)
 {
 #if 1
@@ -275,7 +382,7 @@ int main(int argc, char const** argv)
     sigaction(SIGINT, &sigIntHandler, NULL);
 #endif
 
-    server_options so = parse_args(argc, argv);
+    so = parse_args(argc, argv);
     TRACE("OPTIONS:\n");
     TRACE("  MCAST_ADDR = %s\n", so.mcast_addr.value().c_str());
     TRACE("  CMD_PORT = %d\n", so.cmd_port.value());
@@ -346,23 +453,7 @@ int main(int argc, char const** argv)
 
             if (c.check_header("HELLO"))
             {
-                printf("Received msg: HELLO\n");
-
-                auto[response, size] = cmd::make_simpl("GOOD_DAY",
-                                                       c.cmd_seq,
-                                                       (uint8 const*)(so.mcast_addr.value().c_str()),
-                                                       strlen(so.mcast_addr.value().c_str()));
-
-                printf("Responding to: %s:%d (%lu bytes)\n",
-                       inet_ntoa(remote_address.sin_addr), htons(remote_address.sin_port), size);
-                if (sendto(sock, response.bytes, size, 0, (struct sockaddr*)&remote_address, remote_len) == -1)
-                {
-                    syserr("sendto");
-                }
-                else
-                {
-                    printf("Sent msg: [%.*s]\n", 10, response.head);
-                }
+                handle_request_hello(sock, c, remote_address, remote_len);
             }
             else if (c.check_header("LIST"))
             {
