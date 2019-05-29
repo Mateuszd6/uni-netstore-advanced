@@ -185,9 +185,8 @@ std::string make_filenames_list(std::string const& pattern)
 // If file exists this will load its contents into the vector and return (true,
 // contents) pair, otherwise (false, _) is returned, where _ could be anything.
 std::pair<bool, std::vector<uint8>>
-load_file_if_exists(char const* filename)
+load_file_if_exists(fs::path file_path)
 {
-    fs::path file_path = current_folder / filename;
     std::vector<uint8> contents{};
 
     std::lock_guard<std::mutex> m{fs_mutex};
@@ -197,7 +196,7 @@ load_file_if_exists(char const* filename)
         std::ifstream file{file_path};
         char buffer[buffer_size];
 
-        assert(file.is_open());
+        assert(file.is_open()); // TODO: Dont assert!
         while (!(file.eof() || file.fail())) {
             file.read(buffer, buffer_size);
             contents.reserve(contents.size() + file.gcount());
@@ -211,9 +210,8 @@ load_file_if_exists(char const* filename)
 }
 
 // This assumes that the filename is valid.
-bool try_alloc_file(std::string const& filename, size_t size)
+bool try_alloc_file(fs::path file_path, size_t size)
 {
-    fs::path file_path = current_folder / filename;
     std::lock_guard<std::mutex> m{fs_mutex};
 
     if (current_space < size)
@@ -284,8 +282,10 @@ std::pair<int, in_port_t> init_tcp_conn()
     return {sock, server_address.sin_port};
 }
 
-void tcp_read_file(int sock, char const* filename)
+void tcp_read_file(int sock, fs::path file_path)
 {
+    printf("The path is: %s\n", file_path.c_str());
+
     int msg_sock;
     struct sockaddr_in client_address;
     socklen_t client_address_len = sizeof(client_address);;
@@ -299,19 +299,16 @@ void tcp_read_file(int sock, char const* filename)
     if (msg_sock < 0)
         syserr("accept");
 
-    char buffer[1024];
+    std::vector<uint8> file_contents{};
+    uint8 buffer[1024];
     ssize_t len;
     ssize_t read_total;
     while ((len = read(msg_sock, buffer, 1024)) != 0)
     {
         if (len < 0)
-        {
             syserr("reading from client socket");
-        }
-        else if (len > 0)
-        {
-            printf("read %zd bytes from socket: %.*s\n", len, (int)len, buffer);
-        }
+
+        std::copy(buffer, buffer + len, std::back_inserter(file_contents));
     }
 
     printf("ending connection\n");
@@ -320,6 +317,17 @@ void tcp_read_file(int sock, char const* filename)
 
     if (close(sock) < 0)
         syserr("close");
+
+    {
+        std::lock_guard<std::mutex> m{fs_mutex};
+
+        printf("Writing %lu bytes the file: %s\n", file_contents.size(), file_path.c_str());
+        // TODO: CHeck if file creation succeeded.
+        std::ofstream output_file;
+        output_file.open(file_path, std::ofstream::binary);
+        output_file.write((char const*)file_contents.data(), file_contents.size());
+        output_file.close();
+    }
 }
 
 static void handle_request_hello(int sock,
@@ -437,12 +445,12 @@ static void handle_request_get(int sock,
     }
 
     // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
-
     printf("Requested a file: %s\n", request.simpl.data);
 
     // This check and fileload is atomic. We either load the whole file at once
     // if it exists, or we report that it is missing.
-    auto[exists, content] = load_file_if_exists((char const*)request.simpl.data);
+    fs::path file_path{current_folder / (char const*)request.simpl.data};
+    auto[exists, content] = load_file_if_exists(file_path);
     printf("--> File %s\n", exists ?  "exists" : "does not exist");
 
     // The init happens in the main thread so that we know the port
@@ -460,7 +468,7 @@ static void handle_request_get(int sock,
     printf("Listening on port %hu\n", ntohs(port));
     if (read_thread_started)
         read_thread.join();
-    read_thread = std::thread{tcp_read_file, socket, (char const*)request.simpl.data};
+    read_thread = std::thread{tcp_read_file, socket, file_path};
     read_thread_started = true;
 
     if (sendto(sock, response.bytes, size, 0,
@@ -475,11 +483,12 @@ static void handle_request_add(int sock,
                                sockaddr_in remote_addr,
                                size_t remote_addr_len)
 {
-    printf("Got (from %s:%d): [%s] %lu\n",
+    printf("Got (from %s:%d): [%s] %lu %s\n",
            inet_ntoa(remote_addr.sin_addr),
            ntohs(remote_addr.sin_port),
            "ADD",
-           request.cmplx.get_param());
+           request.cmplx.get_param(),
+           request.cmplx.get_data());
 
     // TODO: What if the data is empty?
     if (!request.validate("ADD", true, true)) {
@@ -489,10 +498,10 @@ static void handle_request_add(int sock,
 
     // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
 
-    printf("Adding a file: %s\n", request.simpl.data);
+    printf("Adding a file: %s\n", request.cmplx.data);
 
-
-    if (try_alloc_file((char const*)request.cmplx.data, request.cmplx.get_param()))
+    fs::path file_path{current_folder / (char const*)request.cmplx.data};
+    if (try_alloc_file(file_path, request.cmplx.get_param()))
     {
         // The init happens in the main thread so that we know the port
         // id. Then we start a new thread giving it a created socket.
@@ -501,7 +510,7 @@ static void handle_request_add(int sock,
         printf("Listening on port %hu\n", ntohs(port));
         if (read_thread_started)
             read_thread.join();
-        read_thread = std::thread{tcp_read_file, socket, (char const*)request.simpl.data};
+        read_thread = std::thread{tcp_read_file, socket, file_path};
         read_thread_started = true;
 
         // TODO: Check this part we are sending int16 in a field for int64.
@@ -511,6 +520,9 @@ static void handle_request_add(int sock,
             ntohs(port), // TODO: Look closer into when this value is BE and when LE.
             request.cmplx.data,
             strlen((char const*)request.cmplx.data));
+        printf("Responding with [%.*s] %lu %lu {%s}\n",
+               10, response.head, response.get_cmd_seq(),
+               response.cmplx.get_param(), (char const*)response.cmplx.data);
 
         if (sendto(sock, response.bytes, size, 0,
                    (sockaddr*)&remote_addr, remote_addr_len) != size)
