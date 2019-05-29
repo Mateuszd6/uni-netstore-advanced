@@ -527,7 +527,7 @@ main(int argc, char** argv)
                                                    inet_ntoa(remote_address.sin_addr),
                                                    htons(remote_address.sin_port),
                                                    10, packet.cmd.head,
-                                                   packet.cmd.cmplx.data);
+                                                   packet.cmd.simpl.data);
                                         }
                                     });
 
