@@ -9,6 +9,9 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <ctime>
+#include <poll.h>
+#include <sys/signalfd.h>
+#include <signal.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -351,13 +354,32 @@ void receive_packets(uint64 cmd_seq, FUNC functor)
     }
 }
 
-void packets_thread(int sock)
+void packets_thread(int sock, int interfd)
 {
+    struct pollfd pfd[2];
+    pfd[0].fd = interfd;
+    pfd[0].events = POLLIN | POLLERR | POLLHUP;
+    pfd[1].fd = sock;
+    pfd[1].events = POLLIN | POLLERR | POLLHUP;;
+
     for (;;)
     {
         send_packet response{};
-        ssize_t rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
-                                   (sockaddr*)&response.from_addr, &response.from_addr_len);
+        int ret = poll(pfd, 2, -1);
+        ssize_t rcv_len;
+
+        if (pfd[0].revents & POLLIN)
+        {
+            logger.trace("Main thread tells me to stop. I'm gonna die now!");
+            return;
+        }
+
+        if (pfd[1].revents & POLLIN)
+        {
+            logger.trace("Got client");
+            rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
+                               (sockaddr*)&response.from_addr, &response.from_addr_len);
+        }
 
         // If there was an error:
         if (rcv_len < 0 && errno != EAGAIN)
@@ -532,8 +554,18 @@ main(int argc, char** argv)
     timeval tv = chrono_to_posix(5s);
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
 
+    // HACK: We can't really use signalfd as we used in the server to stop the
+    // threads, because in this case we have two; one awaiting packets, and one
+    // responding to user commands. To stop the packet thread, we use pipe,
+    // which it polls along with the udp socket. If anything is written to the
+    // pipe, this means that the user has entered exit command, and this thread
+    // will terminate. That way we avoid messing with thread kills and signals.
+    int fields[2];
+    if (pipe (fields) < 0)
+        logger.syserr("pipe");
+
     std::vector<std::thread> workers{};
-    std::thread packet_handler{packets_thread, sock};
+    std::thread packet_handler{packets_thread, sock, fields[0]};
 
     for (;;)
     {
@@ -558,10 +590,17 @@ main(int argc, char** argv)
 
         if (command == "exit")
         {
+            // Writing to pipe, means to packet hndler that he must die now.
+            if (write(fields[1], "0", 1) < 0)
+                logger.syserr("write");
+            packet_handler.join();
+            logger.trace("Joined packet handler!");
+
+            // Now we can join workers.
             for (auto&& th : workers)
                 th.join();
 
-            std::terminate();
+            break;
         }
         else if (command == "discover")
         {

@@ -633,6 +633,7 @@ int main(int argc, char const** argv)
     if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
+    // TODO: Dont use asserts, just syserr's
     // Create a sigset of all the signals that we're interested in
     sigset_t sigset;
     int err = sigemptyset(&sigset);
