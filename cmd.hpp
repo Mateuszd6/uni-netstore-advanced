@@ -1,9 +1,17 @@
 #ifndef CMD_HPP
 #define CMD_HPP
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <sys/socket.h>
+
+#include <cassert>
 #include <functional>
 
 #include "common.hpp"
+
+enum struct cmd_type { cmplx, simpl };
 
 // NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
 //       bytes (65535 - 8 byte UDP header - 20 byte IP header). ~Wikipedia.
@@ -76,5 +84,23 @@ static_assert(sizeof(cmd::bytes) == upd_max_data_size);
 static_assert(sizeof(cmd::bytes) == sizeof(cmd));
 static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::simpl));
 static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::cmplx));
+
+struct send_packet
+{
+    cmd cmd;
+    sockaddr_in from_addr;
+    socklen_t from_addr_len;
+
+    send_packet() : cmd{}, from_addr{} {
+        from_addr_len = sizeof(from_addr);
+    }
+
+    // TODO: Fix naming
+    send_packet(union cmd cmd_, sockaddr_in from_addr_) {
+        this->cmd = cmd_;
+        this->from_addr = from_addr_;
+        this->from_addr_len = sizeof(from_addr_);
+    }
+};
 
 #endif // CMD_HPP

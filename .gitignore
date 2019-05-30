@@ -1,4 +1,6 @@
 *.o
+vgcore.*
+
 netstore-client
 netstore-server
 

@@ -6,17 +6,7 @@
 
 #include "common.hpp"
 #include "cmd.hpp"
-
-struct send_packet
-{
-    cmd cmd;
-    sockaddr_in from_addr;
-    socklen_t from_addr_len;
-
-    send_packet() : cmd{}, from_addr{} {
-        from_addr_len = sizeof(from_addr);
-    }
-};
+#include "logger.hpp"
 
 template<typename T>
 struct work_queue
@@ -40,13 +30,13 @@ public:
         bool q = cv.wait_until(m, timeout, [this]{ return !packet_queue.empty() || aborted; });
         if (!q)
         {
-            printf("TIMEOUT!\n");
+            logger.trace("TIMEOUT!");
             timeouted = true;
             return {};
         }
         else if (aborted) // TODO: empty queue check?
         {
-            printf("ABORT!\n");
+            logger.trace("ABORT!");
             return {};
         }
         else
@@ -63,7 +53,7 @@ public:
         // Dont do anything we we've already aborted/timeouted.
         if (aborted || timeouted)
         {
-            printf("Queue already finished\n");
+            logger.trace("Queue already finished");
             return;
         }
 

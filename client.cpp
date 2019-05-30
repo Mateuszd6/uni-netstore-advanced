@@ -15,7 +15,6 @@
 #include <netdb.h>
 
 #include <atomic>
-#include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -33,6 +32,35 @@ using namespace std::chrono_literals;
 #include "cmd.hpp"
 
 #define TTL_VALUE 4
+
+// We could use iostreams here, but lets not do this, just for consistency.
+std::string get_input_line()
+{
+    char* lineptr = nullptr;
+    size_t n = 0;
+    if (getline(&lineptr, &n, stdin) == -1)
+    {
+        // If eof was reached (C-d clicked in the console), prevent program from
+        // going crazy and just exit safetly. It isn't specified in the task,
+        // but we won't be able to read any commands after this anyway.
+        if (feof(stdin))
+        {
+            logger.trace("C-d read from the console. Exitting.");
+            exit(0); // TODO: Save exit.
+        }
+        else
+            logger.syserr("getline");
+    }
+
+    std::string retval{lineptr};
+    while(!retval.empty() && retval.back() == '\n')
+        retval.pop_back();
+
+    if (lineptr)
+        free(lineptr);
+
+    return retval;
+}
 
 // TODO: This is a copypaste of the server function.
 // If file exists this will load its contents into the vector and return (true,
@@ -92,28 +120,15 @@ struct available_server
     size_t free_space;
 };
 
-std::atomic_uint64_t cmd_seq_counter{0};
-
+static std::atomic_uint64_t cmd_seq_counter{0};
 static std::vector<search_entry> last_search_result{};
 static std::vector<available_server> available_servers{};
-
-// If reason is null, info is not emmited to the screen.
-void report_invalid_pkg(send_packet const& packet, char const* reason)
-{
-    // TODO: These functions CAN fail!
-    fprintf(stderr, "\033[1;31m");
-    fprintf(stderr, "[PCKG ERROR]  Skipping invalid package from %s:%d. %s\n",
-            inet_ntoa(packet.from_addr.sin_addr),
-            htons(packet.from_addr.sin_port),
-            reason == nullptr ? "" : reason);
-    fprintf(stderr, "\033[0m");
-}
 
 void send_file_over_tcp(char const* addr,
                         char const* port,
                         std::vector<uint8> data)
 {
-    printf("Sending %lu bytes to %s:%s\n", data.size(), addr, port);
+    logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
 
     int sock;
     struct addrinfo addr_hints;
@@ -128,54 +143,48 @@ void send_file_over_tcp(char const* addr,
     addr_hints.ai_protocol = IPPROTO_TCP;
     err = getaddrinfo(addr, port, &addr_hints, &addr_result);
     if (err == EAI_SYSTEM) // system error
-        syserr("getaddrinfo");
+        logger.syserr("getaddrinfo");
     else if (err != 0) // other error (host not found, etc.)
-        fatal("getaddrinfo");
+        logger.fatal("getaddrinfo");
 
     // initialize socket according to getaddrinfo results
     sock = socket(addr_result->ai_family, addr_result->ai_socktype, addr_result->ai_protocol);
     if (sock < 0)
-        syserr("socket");
+        logger.syserr("socket");
 
     // connect socket to the server
     if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) < 0)
     {
-        printf("Error: %s(%d)\n", strerror(errno), errno);
-        syserr("connect");
+        logger.syserr("connect");
     }
 
     freeaddrinfo(addr_result);
 
     // TODO: Use write_well
     if (write(sock, data.data(), data.size()) != data.size())
-        syserr("partial / failed write");
+        logger.syserr("partial / failed write");
 
     if (close(sock) < 0) // socket would be closed anyway when the program ends
-        syserr("close");
+        logger.syserr("close");
 }
 
 void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
 {
     if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
     {
-        syserr("sendto");
+        logger.syserr("sendto");
     }
 }
 
 static void handle_response_hello(send_packet const& packet)
 {
-    printf("Received [CMPLX] (from %s:%d): %lu %.*s {%s}\n",
-           inet_ntoa(packet.from_addr.sin_addr),
-           htons(packet.from_addr.sin_port),
-           packet.cmd.cmplx.get_param(),
-           10, packet.cmd.head,
-           packet.cmd.cmplx.get_data());
+    logger.trace_packet("Received from", packet, cmd_type::cmplx);
 
     // TODO: Data sent _can_ be incorrect!!! dont syserr
     in_addr mcast_addr;
     if (inet_aton((char const*)packet.cmd.cmplx.get_data(), &mcast_addr) == 0)
     {
-        syserr("inet_aton");
+        logger.syserr("inet_aton");
     }
 
     available_servers.emplace_back(
@@ -186,11 +195,7 @@ static void handle_response_hello(send_packet const& packet)
 
 static void handle_response_list(send_packet const& packet)
 {
-    printf("Received [SIMPL] (from %s:%d): %.*s {%s}\n",
-           inet_ntoa(packet.from_addr.sin_addr),
-           htons(packet.from_addr.sin_port),
-           10, packet.cmd.head,
-           packet.cmd.simpl.get_data());
+    logger.trace_packet("Received from", packet, cmd_type::simpl);
 
     // TODO: Watch out for more than one \n in a row.
     uint8 const* str = &packet.cmd.simpl.data[0];
@@ -237,7 +242,7 @@ void receive_packets(uint64 cmd_seq, FUNC functor)
         std::optional<send_packet> c = awaiting_packets[cmd_seq]->consume();
         if (!c.has_value())
         {
-            printf("No more [%lu] packets\n", cmd_seq);
+            logger.trace("No more [%lu] packets", cmd_seq);
             break;
         }
 
@@ -248,7 +253,7 @@ void receive_packets(uint64 cmd_seq, FUNC functor)
         std::lock_guard<std::mutex> m{awaitng_packets_mutex};
 
         size_t erased = awaiting_packets.erase(cmd_seq);;
-        printf("Erasing: %lu\n", erased);
+        logger.trace("Erasing: %lu", erased);
     }
 }
 
@@ -263,15 +268,15 @@ void packets_thread(int sock)
         // If there was an error:
         if (rcv_len < 0 && errno != EAGAIN)
         {
-            printf("Error: %s(%d)\n", strerror(errno), errno);
-            printf("Closing!\n");
+            logger.trace("Error: %s(%d)", strerror(errno), errno);
+            logger.trace("Closing!");
             close(sock);
             exit(1);
         }
         else if (rcv_len == 0) // TODO: Socket has been closed (How do we
                                //       even get here when mutlicasting)?
         {
-            printf("NO IDEA WHAT IS HAPPENING!!!!\n");
+            logger.trace("NO IDEA WHAT IS HAPPENING!!!!");
             exit(1);
         }
         else if (rcv_len > 0)
@@ -280,13 +285,13 @@ void packets_thread(int sock)
 
             if (awaiting_packets.count(response.cmd.get_cmd_seq()))
             {
-                printf("-> SOMEONE IS AWAITING PACKET %lu\n", response.cmd.get_cmd_seq());
+                logger.trace("-> SOMEONE IS AWAITING PACKET %lu", response.cmd.get_cmd_seq());
                 awaiting_packets[response.cmd.get_cmd_seq()]->push(response);
             }
             else
             {
-                report_invalid_pkg(response, nullptr);
-                printf("-> UNEXPECTED cmd_seq: %lu\n", response.cmd.get_cmd_seq());
+                logger.pckg_error(response.from_addr, nullptr);
+                logger.trace("-> UNEXPECTED cmd_seq: %lu", response.cmd.get_cmd_seq());
             }
         }
     }
@@ -311,7 +316,7 @@ main(int argc, char** argv)
 
     // parsowanie argumentów programu
     if (argc != 3)
-        fatal("Usage: %s remote_address remote_port\n", argv[0]);
+        logger.fatal("Usage: %s remote_address remote_port", argv[0]);
 
     remote_dotted_address = argv[1];
     remote_port = (in_port_t)atoi(argv[2]);
@@ -319,23 +324,23 @@ main(int argc, char** argv)
     // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
-        syserr("socket");
+        logger.syserr("socket");
 
     // uaktywnienie rozgłaszania (ang. broadcast)
     optval = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
-        syserr("setsockopt broadcast");
+        logger.syserr("setsockopt broadcast");
 
     // ustawienie TTL dla datagramów rozsyłanych do grupy
     optval = TTL_VALUE;
     if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (void*)&optval, sizeof optval) < 0)
-        syserr("setsockopt multicast ttl");
+        logger.syserr("setsockopt multicast ttl");
 
     // zablokowanie rozsyłania grupowego do siebie
 #if 0
     optval = 0;
     if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
-      syserr("setsockopt loop");
+        syserr("setsockopt loop");
 #endif
 
     // podpięcie się pod lokalny adres i port
@@ -343,13 +348,13 @@ main(int argc, char** argv)
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
     local_address.sin_port = htons(0);
     if (bind(sock, (sockaddr*)&local_address, sizeof local_address) < 0)
-        syserr("bind");
+        logger.syserr("bind");
 
     // ustawienie adresu i portu odbiorcy
     remote_address.sin_family = AF_INET;
     remote_address.sin_port = htons(remote_port);
     if (inet_aton(remote_dotted_address, &remote_address.sin_addr) == 0)
-        syserr("inet_aton");
+        logger.syserr("inet_aton");
 
     // ustawienie timeoutu
     timeval tv = chrono_to_posix(5s);
@@ -359,9 +364,7 @@ main(int argc, char** argv)
 
     for (;;)
     {
-        std::string input_line;
-        std::getline(std::cin, input_line);
-
+        std::string input_line = get_input_line();
         std::string_view command{};
         std::string_view param{};
 
@@ -376,8 +379,9 @@ main(int argc, char** argv)
             param = std::string_view{input_line.c_str() + space_occur + 1};
         }
 
-        std::cout << "command is: '" << command
-                  << "', param is: '" << param << "'\n";
+        logger.trace("command is: '%.*s', param is: '%.*s'",
+                     static_cast<int>(command.size()), command.data(),
+                     static_cast<int>(param.size()), param.data());
 
         if (command == "exit")
         {
@@ -389,18 +393,17 @@ main(int argc, char** argv)
             subscribe_for_packets(packet_id);
 
             auto[request, size] = cmd::make_simpl("HELLO", packet_id, 0, 0);
+            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
-            printf("HELLO request sent. Awaiting responses\n");
 
             available_servers.clear();
             receive_packets(packet_id, handle_response_hello); // TODO: Filter headers and sanitize data!
             for (auto&& i : available_servers)
             {
-                printf("\033[1;32m");
                 std::string uaddr = inet_ntoa(i.uaddr.sin_addr); // TODO: Handle the case, when these fail!
                 std::string maddr = inet_ntoa(i.maddr);
-                printf("Found %s (%s) with free space %lu\n", uaddr.c_str(), maddr.c_str(), i.free_space);
-                printf("\033[0m");
+
+                logger.println("Found %s (%s) with free space %lu", uaddr.c_str(), maddr.c_str(), i.free_space);
             }
         }
         else if (command == "search")
@@ -409,36 +412,34 @@ main(int argc, char** argv)
             subscribe_for_packets(packet_id);
 
             auto[request, size] = cmd::make_simpl("LIST", packet_id, (uint8 const*)param.data(), param.size());
+            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
-            printf("LIST request sent. Awaiting responses\n");
 
             last_search_result.clear();
             receive_packets(packet_id, handle_response_list); // TODO: Filter headers and sanitize data!
             for (auto&& i : last_search_result)
             {
-                printf("\033[1;32m");
-                printf("%s (%s)\n", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
-                printf("\033[0m");
+                logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
             }
         }
         else if (command == "remove")
         {
             if (param == "")
             {
-                printf("Cannot remove because of the empty param!\n");
+                logger.trace("Cannot remove because of the empty param!");
                 continue;
             }
 
             uint64 packet_id = cmd_seq_counter++;
             auto[request, size] = cmd::make_simpl("DEL", packet_id, (uint8 const*)param.data(), param.size());
+            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
-            printf("DEL request sent.\n");
         }
         else if (command == "upload")
         {
             if (param == "")
             {
-                printf("Cannot upload because of the empty param!\n");
+                logger.trace("Cannot upload because of the empty param!");
                 continue;
             }
 
@@ -450,8 +451,8 @@ main(int argc, char** argv)
             if (exists)
             {
                 size_t file_size = data.size();
-                printf("File %s(%s) exists, and has %lu bytes\n",
-                       upload_file_path.c_str(), filename.c_str(), file_size);
+                logger.trace("File %s(%s) exists, and has %lu bytes",
+                             upload_file_path.c_str(), filename.c_str(), file_size);
 
                 // Prepare the request that will be sent to the servers.
 
@@ -462,7 +463,7 @@ main(int argc, char** argv)
                               return x.free_space > y.free_space;
                           });
 
-                printf("Querying the servers!\n");
+                logger.trace("Querying the servers!");
                 bool server_agreed = false;
                 sockaddr_in agreed_server_uaddr;
                 uint64 port_num; // Used only is server has agreed.
@@ -474,36 +475,28 @@ main(int argc, char** argv)
 
                     subscribe_for_packets(packet_id);
                     send_dgram(sock, serv.uaddr, request.bytes, size);
-                    printf("ADD request sent to: %s...\n", inet_ntoa(serv.uaddr.sin_addr));
+                    logger.trace("ADD request sent to: %s...", inet_ntoa(serv.uaddr.sin_addr));
 
-                    receive_packets(packet_id,
-                                    [&](send_packet const& packet) {
-                                        if (packet.cmd.check_header("CAN_ADD"))
-                                        {
-                                            printf("Received [CMPLX] (from %s:%d): %.*s %lu {%s}\n",
-                                                   inet_ntoa(remote_address.sin_addr),
-                                                   htons(remote_address.sin_port),
-                                                   10, packet.cmd.head,
-                                                   packet.cmd.cmplx.get_param(),
-                                                   packet.cmd.cmplx.data);
+                    receive_packets(
+                        packet_id,
+                        [&](send_packet const& packet) {
+                            if (packet.cmd.check_header("CAN_ADD"))
+                            {
+                                logger.trace_packet("Received", packet, cmd_type::cmplx);
 
-                                            server_agreed = true;
-                                            agreed_server_uaddr = serv.uaddr;
-                                            port_num = packet.cmd.cmplx.get_param();
-                                        }
-                                        else if (packet.cmd.check_header("NO_WAY"))
-                                        {
-                                            printf("Received [SMPL] (from %s:%d): %.*s {%s}\n",
-                                                   inet_ntoa(remote_address.sin_addr),
-                                                   htons(remote_address.sin_port),
-                                                   10, packet.cmd.head,
-                                                   packet.cmd.simpl.data);
-                                        }
-                                    });
+                                server_agreed = true;
+                                agreed_server_uaddr = serv.uaddr;
+                                port_num = packet.cmd.cmplx.get_param();
+                            }
+                            else if (packet.cmd.check_header("NO_WAY"))
+                            {
+                                logger.trace_packet("Received", packet, cmd_type::simpl);
+                            }
+                        });
 
                     if (server_agreed)
                     {
-                        printf("SERVER AGREED!\n");
+                        logger.trace("SERVER AGREED!");
                         break;
                     }
                 }
@@ -512,16 +505,16 @@ main(int argc, char** argv)
                 {
                     char port_buffer[32];
                     sprintf(port_buffer, "%lu", port_num);
-                    printf("Starting TCP conn at port %s\n", port_buffer);
+                    logger.trace("Starting TCP conn at port %s", port_buffer);
                     send_file_over_tcp(inet_ntoa(agreed_server_uaddr.sin_addr), port_buffer, data);
                 }
                 else
                 {
-                    printf("None of the servers agreeded :(\n");
+                    logger.trace("None of the servers agreeded :(");
                 }
             }
             else
-                printf("File %s does not exist\n", upload_file_path.c_str());
+                logger.trace("File %s does not exist", upload_file_path.c_str());
         }
     }
 
@@ -542,7 +535,7 @@ main(int argc, char** argv)
         // TODO: This way of doing this is probably very bad and inaccurate
         chrono::microseconds time_left =
             timeout - chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - timestamp);
-        printf("Time left: %lu\n", time_left.count());
+        logger.trace("Time left: %lu", time_left.count());
         timeval tv = chrono_to_posix(time_left);
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
 
@@ -555,8 +548,8 @@ main(int argc, char** argv)
         // If there was en error:
         if (rcv_len < 0 && errno != EAGAIN)
         {
-            printf("Error: %s(%d)\n", strerror(errno), errno);
-            printf("Closing!\n");
+            logger.trace("Error: %s(%d)", strerror(errno), errno);
+            logger.trace("Closing!");
             close(sock);
             exit(1);
         }
@@ -567,27 +560,27 @@ main(int argc, char** argv)
         }
         else if (rcv_len > 0)
         {
-            printf("Time difference: %lu\n", time_diff.count());
+            logger.trace("Time difference: %lu", time_diff.count());
 #if 0
-            printf("Received [CMPLX] (from %s:%d): %.*s %lu {%s}\n",
-                   inet_ntoa(from_address.sin_addr),
-                   htons(from_address.sin_port),
-                   (int)rcv_len, response.head,
-                   response.cmplx.get_param(),
-                   response.cmplx.data);
+            logger.trace("Received [CMPLX] (from %s:%d): %.*s %lu {%s}",
+                         inet_ntoa(from_address.sin_addr),
+                         htons(from_address.sin_port),
+                         (int)rcv_len, response.head,
+                         response.cmplx.get_param(),
+                         response.cmplx.data);
 
             char port_buffer[32];
             sprintf(port_buffer, "%lu", response.cmplx.get_param());
-            printf("Sending to %s:%lu\n", inet_ntoa(from_address.sin_addr), response.cmplx.get_param());
+            logger.trace("Sending to %s:%lu", inet_ntoa(from_address.sin_addr), response.cmplx.get_param());
             send_file_over_tcp(inet_ntoa(from_address.sin_addr), port_buffer);
 
-            fprintf(stderr, "Send succeeded\n");
+            fprintf(stderr, "Send succeeded");
 #else
-            printf("Received [SIMPL] (from %s:%d): %.*s {%s}\n",
-                   inet_ntoa(from_address.sin_addr),
-                   htons(from_address.sin_port),
-                   (int)rcv_len, response.head,
-                   response.simpl.data);
+            logger.trace("Received [SIMPL] (from %s:%d): %.*s {%s}",
+                         inet_ntoa(from_address.sin_addr),
+                         htons(from_address.sin_port),
+                         (int)rcv_len, response.head,
+                         response.simpl.data);
 
             // TODO: Watch out for more than one \n in a row.
             uint8 const* str = &response.simpl.data[0];
@@ -609,18 +602,16 @@ main(int argc, char** argv)
         }
         else if (errno == EAGAIN && time_diff > timeout)
         {
-            printf("Timeout has been reached. Ending...\n");
+            logger.trace("Timeout has been reached. Ending...");
             break;
         }
     }
-    printf("\033[1;32m");
     for(auto&& i : last_search_result)
-        printf("%s (%s)\n", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
-    printf("\033[0m");
+        logger.trace("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
 
     // TODO: Make sure that the timeout is correct.
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
-    printf("Time diff: %lu\n", chrono::duration_cast<chrono::milliseconds>(end - begin).count());
+    logger.trace("Time diff: %lu", chrono::duration_cast<chrono::milliseconds>(end - begin).count());
 #endif
 
 
