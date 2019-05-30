@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <mutex>
 #include <unordered_map>
+#include <future>
 namespace fs = std::filesystem;
 namespace chrono = std::chrono;
 using namespace std::chrono_literals;
@@ -188,10 +189,106 @@ static void handle_response_hello(send_packet const& packet)
     }
 
     available_servers.emplace_back(
-        available_server{packet.from_addr,
-                         mcast_addr,
-                         packet.cmd.cmplx.get_param()});
+        available_server{packet.from_addr, mcast_addr, packet.cmd.cmplx.get_param()});
 }
+
+std::mutex awaitng_packets_mutex{};
+std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
+
+struct basic_packet_handler
+{
+    // This fucntion is done every time packet is received. If it returns true,
+    // then no more packets will be consumed.
+    virtual bool on_packet_receive(send_packet const& packet) { return false; }
+
+    // This is done after last packet was processed (either on_packet_receive
+    // returned true, or timeout has been reached).
+    virtual void on_exit() {}
+
+    void receive_packets(uint64 cmd_seq) {
+        for (;;) {
+            std::optional<send_packet> c = awaiting_packets[cmd_seq]->consume();
+            if (!c.has_value())
+            {
+                logger.trace("No more [%lu] packets", cmd_seq);
+                break;
+            }
+
+            if (on_packet_receive(c.value()))
+                break;
+        }
+
+        std::lock_guard<std::mutex> m{awaitng_packets_mutex};
+        size_t erased = awaiting_packets.erase(cmd_seq);
+        logger.trace("Erasing: %lu", erased);
+        on_exit();
+    }
+};
+
+struct hello_packet_handler : basic_packet_handler
+{
+    std::promise<std::vector<available_server>> prom;
+    std::vector<available_server> servers;
+
+    hello_packet_handler(std::promise<std::vector<available_server>> promise) {
+        prom = std::move(promise);
+    }
+
+    bool on_packet_receive(send_packet const& packet) override {
+        logger.trace_packet("Received from", packet, cmd_type::cmplx);
+
+        // TODO: Data sent _can_ be incorrect!!! dont syserr
+        in_addr mcast_addr;
+        if (inet_aton((char const*)packet.cmd.cmplx.get_data(), &mcast_addr) == 0)
+            logger.syserr("inet_aton");
+
+        servers.emplace_back(
+            available_server{packet.from_addr, mcast_addr, packet.cmd.cmplx.get_param()});
+
+        return false;
+    }
+
+    void on_exit() override {
+        prom.set_value(std::move(servers));
+    }
+};
+
+struct list_packet_handler : basic_packet_handler
+{
+    std::promise<std::vector<search_entry>> prom;
+    std::vector<search_entry> search_res;
+
+    list_packet_handler(std::promise<std::vector<search_entry>> promise) {
+        prom = std::move(promise);
+    }
+
+    bool on_packet_receive(send_packet const& packet) override {
+        logger.trace_packet("Received from", packet, cmd_type::simpl);
+
+        // TODO: Watch out for more than one \n in a row.
+        uint8 const* str = &packet.cmd.simpl.data[0];
+        while (*str)
+        {
+            uint8 const* p = str;
+            while (*p && *p != '\n')
+                ++p;
+
+            search_res.emplace_back(
+                search_entry{std::string{(char const*)str, (size_t)(p - str)},
+                             packet.from_addr.sin_addr});
+
+            if (*p == '\n')
+                ++p;
+            str = p;
+        }
+
+        return false;
+    }
+
+    void on_exit() override {
+        prom.set_value(std::move(search_res));
+    }
+};
 
 static void handle_response_list(send_packet const& packet)
 {
@@ -214,9 +311,6 @@ static void handle_response_list(send_packet const& packet)
         str = p;
     }
 }
-
-std::mutex awaitng_packets_mutex{};
-std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
 
 // This adds a work queue to the awaiting_packets map. For now every arriving
 // packet with the seq_cmd equal to one specified will go to the created work
@@ -297,6 +391,84 @@ void packets_thread(int sock)
     }
 }
 
+bool try_upload_file(int sock,
+                     sockaddr_in remote_address,
+                     std::string filename,
+                     std::vector<uint8> file_data)
+{
+    logger.trace("Fetching the list");
+    uint64 fetch_packet_id = cmd_seq_counter++;
+    subscribe_for_packets(fetch_packet_id);
+    auto[request, size] = cmd::make_simpl("HELLO", fetch_packet_id, 0, 0);
+    logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
+    send_dgram(sock, remote_address, request.bytes, size);
+
+    std::promise<std::vector<available_server>> promise;
+    std::future<std::vector<available_server>> future = promise.get_future();
+    hello_packet_handler ph{std::move(promise)};
+    ph.receive_packets(fetch_packet_id);
+
+    future.wait();
+    available_servers.clear();
+    std::vector<available_server> servers{std::move(future.get())};
+    std::sort(servers.begin(), servers.end(),
+              [](auto const& x, auto const& y) {
+                  return x.free_space > y.free_space;
+              });
+
+    logger.trace("Got %lu servers. Querying...", servers.size());
+    bool server_agreed = false;
+    sockaddr_in agreed_server_uaddr;
+    uint64 agreed_server_port_num;
+    for(auto&& serv : servers)
+    {
+        uint64 packet_id = cmd_seq_counter++;
+        auto[request, size] = cmd::make_cmplx(
+            "ADD", packet_id, file_data.size(), (uint8 const*)filename.c_str(), filename.size());
+
+        subscribe_for_packets(packet_id);
+        logger.trace_packet("Sending to", send_packet{request, serv.uaddr}, cmd_type::cmplx);
+        send_dgram(sock, serv.uaddr, request.bytes, size);
+
+        receive_packets(
+            packet_id,
+            [&](send_packet const& packet) {
+                if (packet.cmd.check_header("CAN_ADD"))
+                {
+                    logger.trace_packet("Received", packet, cmd_type::cmplx);
+
+                    server_agreed = true;
+                    agreed_server_uaddr = serv.uaddr;
+                    agreed_server_port_num = packet.cmd.cmplx.get_param();
+                }
+                else if (packet.cmd.check_header("NO_WAY"))
+                {
+                    logger.trace_packet("Received", packet, cmd_type::simpl);
+                }
+            });
+
+        if (server_agreed)
+        {
+            logger.trace("Found server that agreeded to store a file");
+            break;
+        }
+    }
+
+    if (server_agreed)
+    {
+        char port_buffer[32];
+        sprintf(port_buffer, "%lu", agreed_server_port_num);
+        logger.trace("Starting TCP conn at port %s", port_buffer);
+        send_file_over_tcp(inet_ntoa(agreed_server_uaddr.sin_addr), port_buffer, file_data);
+        return true; // TODO: TCP CAN FAIL!
+    }
+    else
+    {
+        logger.trace("None of the servers agreeded");
+        return false;
+    }
+}
+
 int
 main(int argc, char** argv)
 {
@@ -360,7 +532,8 @@ main(int argc, char** argv)
     timeval tv = chrono_to_posix(5s);
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
 
-    auto packet_handler = std::thread{packets_thread, sock};
+    std::vector<std::thread> workers{};
+    std::thread packet_handler{packets_thread, sock};
 
     for (;;)
     {
@@ -385,19 +558,29 @@ main(int argc, char** argv)
 
         if (command == "exit")
         {
+            for (auto&& th : workers)
+                th.join();
+
             std::terminate();
         }
         else if (command == "discover")
         {
             uint64 packet_id = cmd_seq_counter++;
             subscribe_for_packets(packet_id);
-
             auto[request, size] = cmd::make_simpl("HELLO", packet_id, 0, 0);
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
 
+            std::promise<std::vector<available_server>> promise;
+            std::future<std::vector<available_server>> future = promise.get_future();
+            hello_packet_handler ph{std::move(promise)};
+
+            // This will block the main thread.
+            ph.receive_packets(packet_id);
+
+            future.wait();
             available_servers.clear();
-            receive_packets(packet_id, handle_response_hello); // TODO: Filter headers and sanitize data!
+            available_servers = future.get();
             for (auto&& i : available_servers)
             {
                 std::string uaddr = inet_ntoa(i.uaddr.sin_addr); // TODO: Handle the case, when these fail!
@@ -415,8 +598,15 @@ main(int argc, char** argv)
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
 
+            std::promise<std::vector<search_entry>> promise;
+            std::future<std::vector<search_entry>> future = promise.get_future();
+            list_packet_handler ph{std::move(promise)};
+
+            // This will block the main thread.
+            ph.receive_packets(packet_id);
+
             last_search_result.clear();
-            receive_packets(packet_id, handle_response_list); // TODO: Filter headers and sanitize data!
+            last_search_result = future.get();
             for (auto&& i : last_search_result)
             {
                 logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
@@ -450,171 +640,18 @@ main(int argc, char** argv)
             auto[exists, data] = load_file_if_exists(upload_file_path);
             if (exists)
             {
-                size_t file_size = data.size();
                 logger.trace("File %s(%s) exists, and has %lu bytes",
-                             upload_file_path.c_str(), filename.c_str(), file_size);
+                             upload_file_path.c_str(), filename.c_str(), data.size());
 
-                // Prepare the request that will be sent to the servers.
-
-                // Make a copy of a server list. TODO: Fetch the list?
-                std::vector<available_server> servers{available_servers};
-                std::sort(servers.begin(), servers.end(),
-                          [](auto const& x, auto const& y) {
-                              return x.free_space > y.free_space;
-                          });
-
-                logger.trace("Querying the servers!");
-                bool server_agreed = false;
-                sockaddr_in agreed_server_uaddr;
-                uint64 port_num; // Used only is server has agreed.
-                for(auto&& serv : servers)
-                {
-                    uint64 packet_id = cmd_seq_counter++;
-                    auto[request, size] = cmd::make_cmplx(
-                        "ADD", packet_id, file_size, (uint8 const*)filename.c_str(), filename.size());
-
-                    subscribe_for_packets(packet_id);
-                    send_dgram(sock, serv.uaddr, request.bytes, size);
-                    logger.trace("ADD request sent to: %s...", inet_ntoa(serv.uaddr.sin_addr));
-
-                    receive_packets(
-                        packet_id,
-                        [&](send_packet const& packet) {
-                            if (packet.cmd.check_header("CAN_ADD"))
-                            {
-                                logger.trace_packet("Received", packet, cmd_type::cmplx);
-
-                                server_agreed = true;
-                                agreed_server_uaddr = serv.uaddr;
-                                port_num = packet.cmd.cmplx.get_param();
-                            }
-                            else if (packet.cmd.check_header("NO_WAY"))
-                            {
-                                logger.trace_packet("Received", packet, cmd_type::simpl);
-                            }
-                        });
-
-                    if (server_agreed)
-                    {
-                        logger.trace("SERVER AGREED!");
-                        break;
-                    }
-                }
-
-                if (server_agreed)
-                {
-                    char port_buffer[32];
-                    sprintf(port_buffer, "%lu", port_num);
-                    logger.trace("Starting TCP conn at port %s", port_buffer);
-                    send_file_over_tcp(inet_ntoa(agreed_server_uaddr.sin_addr), port_buffer, data);
-                }
-                else
-                {
-                    logger.trace("None of the servers agreeded :(");
-                }
+                // We need this alias, because structured bindings variables are
+                // non capturable.
+                std::vector<uint8> const& file_data = data;
+                workers.push_back(std::thread{try_upload_file, sock, remote_address, filename, file_data});
             }
             else
                 logger.trace("File %s does not exist", upload_file_path.c_str());
         }
     }
-
-#if 0
-    // TODO: If timeout should errno be set to ETIMEDOUT..? It returns EAGAIN!!!
-
-    chrono::steady_clock::time_point begin = chrono::steady_clock::now();
-    ssize_t rcv_len;
-    auto timeout = 2s;
-    auto timestamp = chrono::steady_clock::now();
-    for (;;)
-    {
-        cmd response{};
-
-        struct sockaddr_in from_address;
-        uint32 from_len = sizeof(struct sockaddr_in);
-
-        // TODO: This way of doing this is probably very bad and inaccurate
-        chrono::microseconds time_left =
-            timeout - chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - timestamp);
-        logger.trace("Time left: %lu", time_left.count());
-        timeval tv = chrono_to_posix(time_left);
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-
-        rcv_len = recvfrom(sock, response.bytes, sizeof(response.bytes), 0,
-                           (sockaddr*)&from_address, &from_len);
-
-        auto time_diff = chrono::duration_cast<chrono::milliseconds>(
-            chrono::steady_clock::now() - timestamp);
-
-        // If there was en error:
-        if (rcv_len < 0 && errno != EAGAIN)
-        {
-            logger.trace("Error: %s(%d)", strerror(errno), errno);
-            logger.trace("Closing!");
-            close(sock);
-            exit(1);
-        }
-        else if (rcv_len == 0) // TODO: Socket has been closed (How do we
-            // even get here when mutlicasting)?
-        {
-            exit(1);
-        }
-        else if (rcv_len > 0)
-        {
-            logger.trace("Time difference: %lu", time_diff.count());
-#if 0
-            logger.trace("Received [CMPLX] (from %s:%d): %.*s %lu {%s}",
-                         inet_ntoa(from_address.sin_addr),
-                         htons(from_address.sin_port),
-                         (int)rcv_len, response.head,
-                         response.cmplx.get_param(),
-                         response.cmplx.data);
-
-            char port_buffer[32];
-            sprintf(port_buffer, "%lu", response.cmplx.get_param());
-            logger.trace("Sending to %s:%lu", inet_ntoa(from_address.sin_addr), response.cmplx.get_param());
-            send_file_over_tcp(inet_ntoa(from_address.sin_addr), port_buffer);
-
-            fprintf(stderr, "Send succeeded");
-#else
-            logger.trace("Received [SIMPL] (from %s:%d): %.*s {%s}",
-                         inet_ntoa(from_address.sin_addr),
-                         htons(from_address.sin_port),
-                         (int)rcv_len, response.head,
-                         response.simpl.data);
-
-            // TODO: Watch out for more than one \n in a row.
-            uint8 const* str = &response.simpl.data[0];
-            while (*str)
-            {
-                uint8 const* p = str;
-                while (*p && *p != '\n')
-                    ++p;
-
-                last_search_result.emplace_back(
-                    search_entry{std::string{(char const*)str, (size_t)(p - str)},
-                                 from_address.sin_addr});
-
-                if (*p == '\n')
-                    ++p;
-                str = p;
-            }
-#endif
-        }
-        else if (errno == EAGAIN && time_diff > timeout)
-        {
-            logger.trace("Timeout has been reached. Ending...");
-            break;
-        }
-    }
-    for(auto&& i : last_search_result)
-        logger.trace("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
-
-    // TODO: Make sure that the timeout is correct.
-    chrono::steady_clock::time_point end = chrono::steady_clock::now();
-    logger.trace("Time diff: %lu", chrono::duration_cast<chrono::milliseconds>(end - begin).count());
-#endif
-
-
 
     // koniec
     close(sock);

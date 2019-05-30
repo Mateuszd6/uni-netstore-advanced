@@ -601,8 +601,8 @@ int main(int argc, char const** argv)
 
     // zmienne i struktury opisujące gniazda
     int sock;
-    struct sockaddr_in local_address, remote_address;
-    struct ip_mreq ip_mreq;
+    sockaddr_in local_address, remote_address;
+    ip_mreq ip_mreq;
     unsigned int remote_len = sizeof(remote_address);
 
     // zmienne obsługujące komunikację
@@ -621,14 +621,14 @@ int main(int argc, char const** argv)
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(multicast_dotted_address, &ip_mreq.imr_multiaddr) == 0)
         logger.syserr("inet_aton");
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&ip_mreq, sizeof ip_mreq) < 0)
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&ip_mreq, sizeof(ip_mreq)) < 0)
         logger.syserr("setsockopt");
 
     // podpięcie się pod lokalny adres i port
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
     local_address.sin_port = htons(local_port);
-    if (bind(sock, (struct sockaddr*)&local_address, sizeof local_address) < 0)
+    if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
     // czytanie tego, co odebrano
@@ -637,7 +637,7 @@ int main(int argc, char const** argv)
         logger.trace("AWAITING NEXT!!!!");
 
         cmd c{};
-        rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (struct sockaddr*)&remote_address, &remote_len);
+        rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (sockaddr*)&remote_address, &remote_len);
         if (rcv_len < 0)
         {
             logger.syserr("read");
