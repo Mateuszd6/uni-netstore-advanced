@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <poll.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -570,7 +572,7 @@ static void handle_request_del(int sock,
 
 int main(int argc, char const** argv)
 {
-#if 1
+#if 0
     // TODO: This is a _TEST_
     struct sigaction sigIntHandler;
     sigIntHandler.sa_handler = (void (*)(int))(handle_interrput); // TODO: Check this hack!
@@ -631,13 +633,47 @@ int main(int argc, char const** argv)
     if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
+    // Create a sigset of all the signals that we're interested in
+    sigset_t sigset;
+    int err = sigemptyset(&sigset);
+    assert(err == 0);
+    err = sigaddset(&sigset, SIGINT);
+    assert(err == 0);
+
+    // We must block the signals in order for signalfd to receive them
+    err = sigprocmask(SIG_BLOCK, &sigset, NULL);
+    assert(err == 0);
+
+    // Create the signalfd
+    int sigfd = signalfd(-1, &sigset, 0);
+    assert(sigfd != -1);
+
+    struct pollfd pfd[2];
+    pfd[0].fd = sigfd;
+    pfd[0].events = POLLIN | POLLERR | POLLHUP;
+    pfd[1].fd = sock;
+    pfd[1].events = POLLIN | POLLERR | POLLHUP;;
+
     // czytanie tego, co odebrano
     for (;;)
     {
-        logger.trace("AWAITING NEXT!!!!");
+        logger.trace("Sleeping on poll...");
 
         cmd c{};
-        rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (sockaddr*)&remote_address, &remote_len);
+        int ret = poll(pfd, 2, -1);
+
+        if (pfd[0].revents & POLLIN)
+        {
+            logger.trace("Got interrupt signal. I'm gonna die now!");
+            exit(0);
+        }
+
+        if (pfd[1].revents & POLLIN)
+        {
+            logger.trace("Got client");
+            rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (sockaddr*)&remote_address, &remote_len);
+        }
+
         if (rcv_len < 0)
         {
             logger.syserr("read");
