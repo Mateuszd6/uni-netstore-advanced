@@ -117,21 +117,25 @@ server_options parse_args(int argc, char const** argv)
     return retval;
 }
 
-void handle_interrput(sig_t s){
-    logger.trace("Got interrupt signal. Exitting safetly...");
-    std::terminate();
+// TODO: There is a copy in the client libs!
+void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
+{
+    if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
+    {
+        logger.syserr("sendto");
+    }
 }
-
-// TODO: CHECK macro!
-#define CHECK(X) X
 
 std::thread read_thread;
 bool read_thread_started = false;
 
-// Valid path is one that does not contain '/' and has size > 0. TODO: What about ../foo.txt
-bool sanitize_path(std::string const& filename)
+// Valid path is one that does not contain '/' and has size > 0. we also
+// blacklist .. which might be tricky on some systems.
+bool sanitize_requested_path(std::string const& filename)
 {
-    return (filename.size() > 0 && filename.find('/') == std::string::npos);
+    return (filename.size() > 0 &&
+            filename.find('/') == std::string::npos &&
+            filename != "..");
 }
 
 void index_files(int64 max_space)
@@ -229,16 +233,6 @@ bool try_alloc_file(fs::path file_path, size_t size)
         return false;
     }
 
-    // As we succeeded we must subscrat the file size from the server pool.
-    std::ofstream ofs{file_path};
-    if (ofs.fail())
-    {
-        logger.trace("ERROR: Could not create a file!");
-        return false;
-    }
-
-    ofs << "Dummy";
-    ofs.close();
     current_space -= size;
 
     return true;
@@ -274,7 +268,7 @@ std::pair<int, in_port_t> init_tcp_conn()
     server_address.sin_port = htons(0); // listening on port PORT_NUM
 
     // bind the socket to a concrete address
-    if (bind(sock, (struct sockaddr *) &server_address, sizeof(server_address)) < 0)
+    if (bind(sock, (sockaddr *)(&server_address), sizeof(server_address)) < 0)
         logger.syserr("bind");
 
     // As passing 0 to sin_port got us random port, bind does not set this in
@@ -285,102 +279,129 @@ std::pair<int, in_port_t> init_tcp_conn()
     return {sock, server_address.sin_port};
 }
 
-void tcp_read_file(int sock, fs::path file_path)
+void tcp_read_file(int sock, fs::path file_path, size_t expected_size)
 {
     logger.trace("The path is: %s", file_path.c_str());
 
+    timeval tv = chrono_to_posix(chrono::seconds{* so.timeout});
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+
     int msg_sock;
-    struct sockaddr_in client_address;
-    socklen_t client_address_len = sizeof(client_address);;
+    sockaddr_in client_address;
+    socklen_t client_address_len = sizeof(client_address);
+    std::vector<uint8> file_contents{};
+    bool stream_error = false;
 
     // switch to listening (passive open)
     if (listen(sock, 5) < 0)
         logger.syserr("listen");
 
     // get client connection from the socket
-    msg_sock = accept(sock, (struct sockaddr *) &client_address, &client_address_len);
+    msg_sock = accept(sock, (sockaddr *) &client_address, &client_address_len);
     if (msg_sock < 0)
-        logger.syserr("accept");
-
-    std::vector<uint8> file_contents{};
-    uint8 buffer[1024];
-    ssize_t len;
-    ssize_t read_total;
-    while ((len = read(msg_sock, buffer, 1024)) != 0)
     {
-        if (len < 0)
-            logger.syserr("reading from client socket");
-
-        std::copy(buffer, buffer + len, std::back_inserter(file_contents));
+        if (errno == EAGAIN)
+        {
+            logger.trace("timeout while waiting for client to connect");
+            stream_error = true;
+        }
+        else
+            logger.syserr("accept");
     }
 
-    logger.trace("ending connection");
-    if (close(msg_sock) < 0)
-        logger.syserr("close");
+    if (!stream_error)
+    {
+        // Now we have to set read timeout independently.
+        setsockopt(msg_sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+
+        uint8 buffer[1024];
+        ssize_t len;
+        while ((len = read(msg_sock, buffer, 1024)) > 0)
+            std::copy(buffer, buffer + len, std::back_inserter(file_contents));
+
+        if (len < 0)
+        {
+            if (errno == EAGAIN)
+            {
+                logger.trace("timeout while reading the file.");
+                stream_error = true;
+            }
+            else
+                logger.syserr("reading from client socket");
+        }
+
+        if (!stream_error && file_contents.size() != expected_size) {
+            logger.trace("Sent file does not match the expected size!");
+            stream_error = true;
+        }
+
+        if (close(msg_sock) < 0)
+            logger.syserr("close");
+    }
 
     if (close(sock) < 0)
         logger.syserr("close");
 
+    if (!stream_error)
     {
+        logger.trace("Saving the file.");
+
         std::lock_guard<std::mutex> m{fs_mutex};
 
         logger.trace("Writing %lu bytes the file: %s", file_contents.size(), file_path.c_str());
-        // TODO: CHeck if file creation succeeded.
-        std::ofstream output_file;
-        output_file.open(file_path, std::ofstream::binary);
-        output_file.write((char const*)file_contents.data(), file_contents.size());
-        output_file.close();
+
+        // As we succeeded we must subscrat the file size from the server pool.
+        std::ofstream output_file{file_path};
+        if (output_file.fail())
+        {
+            logger.trace("ERROR: Could not create a file!");
+            stream_error = true;
+        }
+        else
+        {
+            output_file.write((char const*)file_contents.data(), file_contents.size());
+            output_file.close();
+            logger.trace("File saved successfully");
+        }
+    }
+
+    if (stream_error)
+    {
+        logger.trace("Streaming error. File has not been saved");
+        // TODO: Give memory back to the mempool.
     }
 }
 
-static void handle_request_hello(int sock,
-                                 cmd const& request,
-                                 sockaddr_in remote_addr,
-                                 size_t remote_addr_len)
+static void handle_request_hello(int sock, send_packet const& packet)
 {
-    logger.trace("Got (from %s:%d): [%s]",
-                 inet_ntoa(remote_addr.sin_addr),
-                 ntohs(remote_addr.sin_port),
-                 "HELLO");
+    logger.trace_packet("Got", packet, cmd_type::simpl);
 
-    if (!request.validate("HELLO", false, false)) {
+    if (!packet.cmd.validate("HELLO", false, false)) {
         logger.trace("INVALID REQUEST");
         return;
     }
 
     auto[response, size] = cmd::make_cmplx(
         "GOOD_DAY",
-        request.get_cmd_seq(),
+        packet.cmd.get_cmd_seq(),
         current_space,
         (uint8 const*)(so.mcast_addr.value().c_str()),
         strlen(so.mcast_addr.value().c_str()));
 
-    logger.trace("Responding with: %.*s %lu %lu (%lu bytes)",
-                 10, response.head, response.get_cmd_seq(), response.cmplx.get_param(), size);
-
-    if (sendto(sock, response.bytes, size, 0,
-               (sockaddr*)&remote_addr, remote_addr_len) != size)
-    {
-        logger.syserr("sendto");
-    }
+    logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
+    send_dgram(sock, packet.from_addr, response.bytes, size);
 }
 
-static void handle_request_list(int sock,
-                                cmd const& request,
-                                sockaddr_in remote_addr,
-                                size_t remote_addr_len)
+static void handle_request_list(int sock, send_packet const& packet)
 {
-    logger.trace("Got (from %s:%d): [%s]",
-                 inet_ntoa(remote_addr.sin_addr),
-                 ntohs(remote_addr.sin_port),
-                 "LIST");
+    logger.trace_packet("Got", packet, cmd_type::simpl);
 
-    if (!request.validate("LIST", false, true)) {
+    if (!packet.cmd.validate("LIST", false, true)) {
         logger.trace("INVALID REQUEST");
         return;
     }
 
-    std::string filenames = make_filenames_list((char const*)request.simpl.data);
+    std::string filenames = make_filenames_list((char const*)packet.cmd.simpl.data);
     std::vector<std::string> fnames_splited{};
     char const* delim = "\n";
     auto prev = filenames.begin();
@@ -403,31 +424,29 @@ static void handle_request_list(int sock,
         prev = find;
     } while (prev++ != filenames.end());
 
+#if 0
     logger.trace("FNAMES, CHOPPED:");
     for (auto&& i : fnames_splited)
         logger.trace("{%s}", i.c_str());
-
     logger.trace("Which is %lu packets", fnames_splited.size());
+#endif
 
     for (auto&& fnames_chunk : fnames_splited)
     {
         auto[response, size] = cmd::make_simpl(
             "MY_LIST",
-            request.get_cmd_seq(),
+            packet.cmd.get_cmd_seq(),
             (uint8 const*)(fnames_chunk.c_str()),
             fnames_chunk.size());
 
-        logger.trace("Responding with: %.*s %lu (%lu bytes)",
-                     10, response.head, response.get_cmd_seq(), size);
-
-        if (sendto(sock, response.bytes, size, 0,
-                   (sockaddr*)&remote_addr, remote_addr_len) != size)
-        {
-            logger.syserr("sendto");
-        }
+        logger.trace_packet("Responding to",
+                            send_packet{response, packet.from_addr},
+                            cmd_type::simpl);
+        send_dgram(sock, packet.from_addr, response.bytes, size);
     }
 }
 
+#if 0
 static void handle_request_get(int sock,
                                cmd const& request,
                                sockaddr_in remote_addr,
@@ -467,40 +486,29 @@ static void handle_request_get(int sock,
     logger.trace("Listening on port %hu", ntohs(port));
     if (read_thread_started)
         read_thread.join();
-    read_thread = std::thread{tcp_read_file, socket, file_path};
+    read_thread = std::thread{tcp_read_file, socket, file_path, 0};
     read_thread_started = true;
 
-    if (sendto(sock, response.bytes, size, 0,
-               (sockaddr*)&remote_addr, remote_addr_len) != size)
-    {
-        logger.syserr("sendto");
-    }
+    send_dgram(sock, remote_addr, response.bytes, size);
 }
+#endif
 
-static void handle_request_add(int sock,
-                               cmd const& request,
-                               sockaddr_in remote_addr,
-                               size_t remote_addr_len)
+static void handle_request_add(int sock, send_packet const& packet)
 {
-    logger.trace("Got (from %s:%d): [%s] %lu %s",
-                 inet_ntoa(remote_addr.sin_addr),
-                 ntohs(remote_addr.sin_port),
-                 "ADD",
-                 request.cmplx.get_param(),
-                 request.cmplx.get_data());
+    logger.trace_packet("Got", packet, cmd_type::cmplx);
 
     // TODO: What if the data is empty?
-    if (!request.validate("ADD", true, true)) {
+    if (!packet.cmd.validate("ADD", true, true)) {
         logger.trace("INVALID REQUEST");
         return;
     }
 
     // TODO: Make sure that DATA is _NOT_ empty(cannot have an empty filename) and SANITIZE IT!
 
-    logger.trace("Adding a file: %s", request.cmplx.data);
+    logger.trace("Adding a file: %s", packet.cmd.cmplx.data);
 
-    fs::path file_path{current_folder / (char const*)request.cmplx.data};
-    if (try_alloc_file(file_path, request.cmplx.get_param()))
+    fs::path file_path{current_folder / (char const*)packet.cmd.cmplx.data};
+    if (try_alloc_file(file_path, packet.cmd.cmplx.get_param()))
     {
         // The init happens in the main thread so that we know the port
         // id. Then we start a new thread giving it a created socket.
@@ -509,25 +517,19 @@ static void handle_request_add(int sock,
         logger.trace("Listening on port %hu", ntohs(port));
         if (read_thread_started)
             read_thread.join();
-        read_thread = std::thread{tcp_read_file, socket, file_path};
+        read_thread = std::thread{tcp_read_file, socket, file_path, packet.cmd.cmplx.get_param()};
         read_thread_started = true;
 
         // TODO: Check this part we are sending int16 in a field for int64.
         auto[response, size] = cmd::make_cmplx(
             "CAN_ADD",
-            request.get_cmd_seq(),
+            packet.cmd.get_cmd_seq(),
             ntohs(port), // TODO: Look closer into when this value is BE and when LE.
-            request.cmplx.data,
-            strlen((char const*)request.cmplx.data));
-        logger.trace("Responding with [%.*s] %lu %lu {%s}",
-                     10, response.head, response.get_cmd_seq(),
-                     response.cmplx.get_param(), (char const*)response.cmplx.data);
+            packet.cmd.cmplx.data,
+            strlen((char const*)packet.cmd.cmplx.data));
 
-        if (sendto(sock, response.bytes, size, 0,
-                   (sockaddr*)&remote_addr, remote_addr_len) != size)
-        {
-            logger.syserr("sendto");
-        }
+        logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
+        send_dgram(sock, packet.from_addr, response.bytes, size);
     }
     else
     {
@@ -536,51 +538,33 @@ static void handle_request_add(int sock,
         // TODO: Check this part we are sending int16 in a field for int64.
         auto[response, size] = cmd::make_simpl(
             "NO_WAY",
-            request.get_cmd_seq(),
-            request.cmplx.data,
-            strlen((char const*)request.cmplx.data));
+            packet.cmd.get_cmd_seq(),
+            packet.cmd.cmplx.data,
+            strlen((char const*)packet.cmd.cmplx.data));
 
-        if (sendto(sock, response.bytes, size, 0,
-                   (sockaddr*)&remote_addr, remote_addr_len) != size)
-        {
-            logger.syserr("sendto");
-        }
+        logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::simpl);
+        send_dgram(sock, packet.from_addr, response.bytes, size);
     }
 }
 
-static void handle_request_del(int sock,
-                               cmd const& request,
-                               sockaddr_in remote_addr,
-                               size_t remote_addr_len)
+static void handle_request_del(int sock, send_packet const& packet)
 {
-    logger.trace("Got (from %s:%d): [%s]",
-                 inet_ntoa(remote_addr.sin_addr),
-                 ntohs(remote_addr.sin_port),
-                 "DEL");
+    logger.trace_packet("Got", packet, cmd_type::simpl);
 
     // TODO: What if the data is empty?
-    if (!request.validate("DEL", false, true)) {
+    if (!packet.cmd.validate("DEL", false, true)) {
         logger.trace("INVALID REQUEST");
         return;
     }
 
     // TODO: Sanitize path!!
 
-    logger.trace("Removing file %s", request.simpl.data);
-    try_delete_file((char const*)request.simpl.data);
+    logger.trace("Removing file %s", packet.cmd.simpl.data);
+    try_delete_file((char const*)packet.cmd.simpl.data);
 }
 
 int main(int argc, char const** argv)
 {
-#if 0
-    // TODO: This is a _TEST_
-    struct sigaction sigIntHandler;
-    sigIntHandler.sa_handler = (void (*)(int))(handle_interrput); // TODO: Check this hack!
-    sigemptyset(&sigIntHandler.sa_mask);
-    sigIntHandler.sa_flags = 0;
-    sigaction(SIGINT, &sigIntHandler, NULL);
-#endif
-
     so = parse_args(argc, argv);
     logger.trace("OPTIONS:");
     logger.trace("  MCAST_ADDR = %s", so.mcast_addr.value().c_str());
@@ -660,19 +644,23 @@ int main(int argc, char const** argv)
     {
         logger.trace("Sleeping on poll...");
 
-        cmd c{};
+        send_packet response{};
         int ret = poll(pfd, 2, -1);
 
         if (pfd[0].revents & POLLIN)
         {
             logger.trace("Got interrupt signal. I'm gonna die now!");
+
+            if (read_thread_started)
+                read_thread.join();
             exit(0);
         }
 
         if (pfd[1].revents & POLLIN)
         {
             logger.trace("Got client");
-            rcv_len = recvfrom(sock, c.bytes, sizeof(c), 0, (sockaddr*)&remote_address, &remote_len);
+            rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
+                               (sockaddr*)&response.from_addr, &response.from_addr_len);
         }
 
         if (rcv_len < 0)
@@ -681,32 +669,22 @@ int main(int argc, char const** argv)
         }
         else
         {
-            logger.trace("read %zd bytes: %.*s", rcv_len, (int)rcv_len, c.bytes);
+            logger.trace("read %zd bytes: %.*s", rcv_len, (int)rcv_len, response.cmd.bytes);
 
-            if (c.check_header("HELLO"))
-            {
-                handle_request_hello(sock, c, remote_address, remote_len);
-            }
-            else if (c.check_header("LIST"))
-            {
-                handle_request_list(sock, c, remote_address, remote_len);
-            }
-            else if (c.check_header("GET"))
-            {
-                handle_request_get(sock, c, remote_address, remote_len);
-            }
-            else if (c.check_header("ADD"))
-            {
-                handle_request_add(sock, c, remote_address, remote_len);
-            }
-            else if (c.check_header("DEL"))
-            {
-                handle_request_del(sock, c, remote_address, remote_len);
-            }
+            if (response.cmd.check_header("HELLO"))
+                handle_request_hello(sock, response);
+            else if (response.cmd.check_header("LIST"))
+                handle_request_list(sock, response);
+#if 0
+            else if (response.cmd.check_header("GET"))
+                handle_request_get(sock, response.cmd, response.from_addr, response.from_addr_len);
+#endif
+            else if (response.cmd.check_header("ADD"))
+                handle_request_add(sock, response);
+            else if (response.cmd.check_header("DEL"))
+                handle_request_del(sock, response);
             else
-            {
                 logger.trace("Received unexpected bytes.");
-            }
         }
     }
 

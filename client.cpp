@@ -28,8 +28,6 @@
 #include <unordered_map>
 #include <future>
 namespace fs = std::filesystem;
-namespace chrono = std::chrono;
-using namespace std::chrono_literals;
 
 #include "common.hpp"
 #include "work_queue.hpp"
@@ -92,25 +90,6 @@ load_file_if_exists(fs::path file_path)
     return {false, contents};
 }
 
-// TODO: Decide whether or not this stays. TODO: Templetize with duration.
-template<typename DUR>
-timeval chrono_to_posix(DUR duration)
-{
-    chrono::microseconds usec = duration;
-    timeval retval;
-    if (usec <= chrono::microseconds(0))
-    {
-        retval.tv_sec = retval.tv_usec = 0;
-    }
-    else
-    {
-        retval.tv_sec = usec.count() / 1000000;
-        retval.tv_usec = usec.count() % 1000000;
-    }
-
-    return retval;
-}
-
 struct search_entry
 {
     std::string filename;
@@ -164,14 +143,19 @@ void send_file_over_tcp(char const* addr,
 
     freeaddrinfo(addr_result);
 
+#if 1
     // TODO: Use write_well
     if (write(sock, data.data(), data.size()) != data.size())
         logger.syserr("partial / failed write");
+#else
+    sleep(20);
+#endif
 
     if (close(sock) < 0) // socket would be closed anyway when the program ends
         logger.syserr("close");
 }
 
+// TODO: There is a copy in the server libs!
 void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
 {
     if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
@@ -682,10 +666,9 @@ main(int argc, char** argv)
                 logger.trace("File %s(%s) exists, and has %lu bytes",
                              upload_file_path.c_str(), filename.c_str(), data.size());
 
-                // We need this alias, because structured bindings variables are
-                // non capturable.
-                std::vector<uint8> const& file_data = data;
-                workers.push_back(std::thread{try_upload_file, sock, remote_address, filename, file_data});
+                workers.push_back(
+                    std::thread{try_upload_file, sock, remote_address,
+                                std::move(filename), std::move(data)});
             }
             else
                 logger.trace("File %s does not exist", upload_file_path.c_str());
@@ -694,5 +677,4 @@ main(int argc, char** argv)
 
     // koniec
     close(sock);
-    exit(EXIT_SUCCESS);
 }
