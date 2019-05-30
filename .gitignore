@@ -1,0 +1,8 @@
+*.o
+netstore-client
+netstore-server
+
+testdir/*
+lotof_names/*
+
+.clang_complete

@@ -92,7 +92,7 @@ struct available_server
     size_t free_space;
 };
 
-std::atomic_int cmd_seq_counter{0};
+std::atomic_uint64_t cmd_seq_counter{0};
 
 static std::vector<search_entry> last_search_result{};
 static std::vector<available_server> available_servers{};
@@ -156,41 +156,11 @@ void send_file_over_tcp(char const* addr,
 
 void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
 {
-
     if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
     {
         syserr("sendto");
     }
 }
-
-#if 0
-static void send_request_hello(int sock, sockaddr remote_addr, size_t remote_addr_len)
-{
-    auto[request, size] = cmd::make_simpl("HELLO", cmd_seq_counter++, nullptr, 0);
-    if (sendto(sock, request.bytes, size, 0,
-               (sockaddr*)&remote_addr, remote_addr_len) != size)
-    {
-        syserr("sendto");
-    }
-}
-
-static void send_request_list(int sock,
-                              sockaddr remote_addr,
-                              size_t remote_addr_len,
-                              std::string const& filter)
-{
-    auto[request, size] = cmd::make_simpl("LIST",
-                                          cmd_seq_counter++,
-                                          (uint8 const*)filter.c_str(),
-                                          filter.size());
-
-    if (sendto(sock, request.bytes, size, 0,
-               (sockaddr*)&remote_addr, remote_addr_len) != size)
-    {
-        syserr("sendto");
-    }
-}
-#endif
 
 static void handle_response_hello(send_packet const& packet)
 {
@@ -254,7 +224,7 @@ work_queue<send_packet>* subscribe_for_packets(uint64 cmd_seq)
     assert(awaiting_packets.count(cmd_seq) == 0);
     awaiting_packets.emplace(
         cmd_seq,
-        std::make_unique<work_queue<send_packet>>(std::chrono::system_clock::now() + 2s));
+        std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() + 2s));
 
     return awaiting_packets[cmd_seq].get();
 }
@@ -299,7 +269,7 @@ void packets_thread(int sock)
             exit(1);
         }
         else if (rcv_len == 0) // TODO: Socket has been closed (How do we
-                               // even get here when mutlicasting)?
+                               //       even get here when mutlicasting)?
         {
             printf("NO IDEA WHAT IS HAPPENING!!!!\n");
             exit(1);

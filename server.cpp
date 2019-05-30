@@ -406,10 +406,6 @@ static void handle_request_list(int sock,
 
     printf("Which is %lu packets\n", fnames_splited.size());
 
-    // TODO: Handle the case, when these are greater.
-    // assert(filenames.size() <= sizeof(cmd::simpl));
-    // printf("Filenames: {%s}\n", filenames.c_str());
-
     for (auto&& fnames_chunk : fnames_splited)
     {
         auto[response, size] = cmd::make_simpl(
