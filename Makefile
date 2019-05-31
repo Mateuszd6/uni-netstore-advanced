@@ -1,13 +1,13 @@
 # TODO: Better make for boost libs?
 .PHONY: all debug release clean
 
-CC=clang++
+CC=g++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -fno-omit-frame-pointer
 RELEASE_FLAGS=-O3 -DNDEBUG
 INCLUDE_FLAGS=-I.
-LINK_FLAGS=-lstdc++fs
+LINK_FLAGS=-lstdc++fs -lpthread
 WARN_FLAGS=-Wall -Wextra -Wshadow
 
 # students has completly broken sanitizer dependencies.

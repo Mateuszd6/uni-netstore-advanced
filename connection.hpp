@@ -1,6 +1,10 @@
 #ifndef CONNECTION_H
 #define CONNECTION_H
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
 #include "common.cpp"
 #include "logger.hpp"
 
@@ -33,10 +37,56 @@ std::pair<int, in_port_t> init_stream_conn()
     if (getsockname(sock, (sockaddr *)(&server_address), &server_address_len) < 0)
         logger.syserr("getsockname");
 
+    // switch to listening (passive open)
+    if (listen(sock, 5) < 0)
+        logger.syserr("listen");
+
     return {sock, server_address.sin_port};
 }
 
-constexpr static size_t send_block_size = 1024;
+int connect_to_stream(char const* addr, char const* port, chrono::microseconds timeout)
+{
+    int sock;
+    addrinfo addr_hints;
+    addrinfo *addr_result;
+
+    // 'converting' host/port in string to struct addrinfo
+    memset(&addr_hints, 0, sizeof(addrinfo));
+    addr_hints.ai_family = AF_INET;
+    addr_hints.ai_socktype = SOCK_STREAM;
+    addr_hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo(addr, port, &addr_hints, &addr_result) != 0)
+    {
+        return -1;
+    }
+
+    // initialize socket according to getaddrinfo results
+    sock = socket(addr_result->ai_family, addr_result->ai_socktype, addr_result->ai_protocol);
+    if (sock < 0)
+    {
+        logger.trace("creating a socket failed");
+        freeaddrinfo(addr_result);
+        return -1;
+    }
+
+    timeval tv = chrono_to_posix(timeout);
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+
+    // connect socket to the server
+    if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) < 0)
+    {
+        logger.trace("connect failed");
+        freeaddrinfo(addr_result);
+        safe_close(sock);
+        return -1;
+    }
+
+    freeaddrinfo(addr_result);
+    return sock;
+}
+
+// TODO: rename, coz its used also when receiving.
+constexpr static size_t send_block_size = 4096;
 
 // Sends count bytes over tcp socket. Returns -1 on error.
 ssize_t send_stream(int fd, uint8* buffer, size_t count) {

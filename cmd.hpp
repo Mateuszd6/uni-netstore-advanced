@@ -16,11 +16,13 @@ enum struct cmd_type { cmplx, simpl };
 // NOTE: The data size limit, imposed by the underlying IPv4 protocol, is 65507
 //       bytes (65535 - 8 byte UDP header - 20 byte IP header). ~Wikipedia.
 constexpr size_t upd_max_data_size = 65507;
-union cmd
+union command
 {
     constexpr static size_t common_header_size = 10  + sizeof(uint64);
-    constexpr static size_t simpl_max_data = upd_max_data_size - common_header_size;
-    constexpr static size_t cmplx_max_data = upd_max_data_size - common_header_size - sizeof(uint64);
+    constexpr static size_t simpl_head_size = common_header_size;
+    constexpr static size_t simpl_max_data = upd_max_data_size - simpl_head_size;
+    constexpr static size_t cmplx_head_size = common_header_size + sizeof(uint64);
+    constexpr static size_t cmplx_max_data = upd_max_data_size - cmplx_head_size;
 
     // TODO: Concider changing chars to uint8's.
     // TODO(IMPORTANT): Doing it with strlen is badd, because packets may contains 0s.
@@ -52,13 +54,13 @@ union cmd
     };
     uint8 bytes[upd_max_data_size];
 
-    cmd();
+    command();
 
     // These fucntions let us construct the response object and also return
     // their size which is the number of bytes user has to send.
-    static std::pair<cmd, size_t> make_simpl(char const* head, uint64 cmd_seq,
+    static std::pair<command, size_t> make_simpl(char const* head, uint64 cmd_seq,
                                              uint8 const* data, size_t data_len);
-    static std::pair<cmd, size_t> make_cmplx(char const* head, uint64 cmd_seq,
+    static std::pair<command, size_t> make_cmplx(char const* head, uint64 cmd_seq,
                                              uint64 param, uint8 const* data, size_t data_len);
 
     char const* get_head() const;
@@ -71,23 +73,19 @@ union cmd
 
     void clear();
 
-    // if expect_data is false, we make sure, that the whole data[] array is
-    // zeroed. If this func returns false, this means that the packed is ill
-    // formed.
-    bool validate(char const* expected_header,
-                  bool is_cmplx,
-                  bool expect_data) const;
+    bool contains_required_fields(cmd_type type, ssize_t msg_size) const;
+    bool contains_data(cmd_type type, ssize_t msg_size) const;
 };
 
 // Make sure that the cmd union is packed properly.
-static_assert(sizeof(cmd::bytes) == upd_max_data_size);
-static_assert(sizeof(cmd::bytes) == sizeof(cmd));
-static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::simpl));
-static_assert(sizeof(cmd::bytes) == 10 + sizeof(uint64) + sizeof(cmd::cmplx));
+static_assert(sizeof(command::bytes) == upd_max_data_size);
+static_assert(sizeof(command::bytes) == sizeof(command));
+static_assert(sizeof(command::bytes) == 10 + sizeof(uint64) + sizeof(command::simpl));
+static_assert(sizeof(command::bytes) == 10 + sizeof(uint64) + sizeof(command::cmplx));
 
 struct send_packet
 {
-    cmd cmd;
+    command cmd;
     sockaddr_in from_addr;
     socklen_t from_addr_len;
 
@@ -96,7 +94,7 @@ struct send_packet
     }
 
     // TODO: Fix naming
-    send_packet(union cmd cmd_, sockaddr_in from_addr_) {
+    send_packet(command cmd_, sockaddr_in from_addr_) {
         this->cmd = cmd_;
         this->from_addr = from_addr_;
         this->from_addr_len = sizeof(from_addr_);

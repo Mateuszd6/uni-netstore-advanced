@@ -49,7 +49,8 @@ std::string get_input_line()
         if (feof(stdin))
         {
             logger.trace("C-d read from the console. Exitting.");
-            exit(0); // TODO: Save exit.
+            free(lineptr);
+            return "exit";
         }
         else
             logger.syserr("getline");
@@ -59,9 +60,7 @@ std::string get_input_line()
     while(!retval.empty() && retval.back() == '\n')
         retval.pop_back();
 
-    if (lineptr)
-        free(lineptr);
-
+    free(lineptr);
     return retval;
 }
 
@@ -94,7 +93,7 @@ load_file_if_exists(fs::path file_path)
 struct search_entry
 {
     std::string filename;
-    in_addr server_unicast_addr;
+    sockaddr_in server_uaddr;
 };
 
 struct available_server
@@ -108,41 +107,61 @@ static std::atomic_uint64_t cmd_seq_counter{0};
 static std::vector<search_entry> last_search_result{};
 static std::vector<available_server> available_servers{};
 
+std::pair<bool, std::string> receive_file_over_tcp(char const* addr,
+                                                   char const* port,
+                                                   fs::path out_file_path)
+{
+    logger.trace("Receiving file %s from %s:%s", out_file_path.c_str(), addr, port);
+
+    // TODO: Set timeout!
+    // TODO: Set timeout!
+    int sock = connect_to_stream(addr, port, 3s);
+    if (sock < 0)
+        return {false, "Cound not connect to the server"};
+
+    std::vector<uint8> file_content;
+    uint8 buffer[send_block_size];
+    ssize_t len;
+    while ((len = read(sock, buffer, send_block_size)) > 0)
+    {
+        logger.trace("Got %lu bytes", len);
+        std::copy(buffer, buffer + len, std::back_inserter(file_content));
+    }
+
+    safe_close(sock);
+
+    if (len < 0)
+    {
+        if (errno == EAGAIN)
+            return {false, "Server timeout"};
+        else
+            return {false, "Error while reading the socket"};
+    }
+
+    std::ofstream output_file{out_file_path, std::ofstream::binary};
+    if (output_file.fail())
+        return {false, "Could not create a file"};
+
+    output_file.write((char const*)file_content.data(), file_content.size());
+    output_file.close();
+    logger.trace("File saved successfully");
+    return {true, ""};
+}
+
 bool send_file_over_tcp(char const* addr,
                         char const* port,
                         std::vector<uint8> data)
 {
     logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
 
-    int sock;
-    addrinfo addr_hints;
-    addrinfo *addr_result;
-
-    // 'converting' host/port in string to struct addrinfo
-    memset(&addr_hints, 0, sizeof(addrinfo));
-    addr_hints.ai_family = AF_INET;
-    addr_hints.ai_socktype = SOCK_STREAM;
-    addr_hints.ai_protocol = IPPROTO_TCP;
-    if (getaddrinfo(addr, port, &addr_hints, &addr_result) != 0)
-        logger.syserr("getaddrinfo");
-
-    // initialize socket according to getaddrinfo results
-    sock = socket(addr_result->ai_family, addr_result->ai_socktype, addr_result->ai_protocol);
+    // TODO: Set timeout!
+    // TODO: Set timeout!
+    int sock = connect_to_stream(addr, port, 3s);
     if (sock < 0)
-        logger.syserr("socket");
-
-    timeval tv = chrono_to_posix(2s); // TODO: Set timeout!
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-
-    // connect socket to the server
-    if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) < 0)
     {
         logger.trace("Cound not connect to the server");
-        safe_close(sock);
         return false;
     }
-
-    freeaddrinfo(addr_result);
 
     if (send_stream(sock, data.data(), data.size()) != data.size())
     {
@@ -151,41 +170,44 @@ bool send_file_over_tcp(char const* addr,
         return false;
     }
 
+    logger.trace("Sending successfull");
     safe_close(sock);
     return true;
 }
 
-#if 0
-static void handle_response_hello(send_packet const& packet)
-{
-    logger.trace_packet("Received from", packet, cmd_type::cmplx);
-
-    // TODO: Data sent _can_ be incorrect!!! dont syserr
-    in_addr mcast_addr;
-    if (inet_aton((char const*)packet.cmd.cmplx.get_data(), &mcast_addr) == 0)
-    {
-        logger.syserr("inet_aton");
-    }
-
-    available_servers.emplace_back(
-        available_server{packet.from_addr, mcast_addr, packet.cmd.cmplx.get_param()});
-}
-#endif
-
 std::mutex awaitng_packets_mutex{};
 std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
 
+template<typename T>
 struct basic_packet_handler
 {
+protected:
+    uint64 cmd_seq;
+
     // This fucntion is done every time packet is received. If it returns true,
     // then no more packets will be consumed.
     virtual bool on_packet_receive(send_packet const& packet) { return false; }
 
-    // This is done after last packet was processed (either on_packet_receive
-    // returned true, or timeout has been reached).
-    virtual void on_exit() {}
+    // This is called to obtain the result, once after package receive loop
+    // finishes.
+    virtual T get_result() { return T{}; }
 
-    void receive_packets(uint64 cmd_seq) {
+public:
+    basic_packet_handler(uint64 id) {
+        cmd_seq = id;
+
+        // Subscribe for packets:
+        std::lock_guard<std::mutex> m{awaitng_packets_mutex};
+
+        // TODO: Don't do it, or if it happens, change the packed seq num
+        assert(awaiting_packets.count(cmd_seq) == 0);
+        awaiting_packets.emplace(
+            cmd_seq,
+            // TODO: TIMEOUT!!!
+            std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() + 2s));
+    }
+
+    T receive_packets(uint64 cmd_seq) {
         for (;;) {
             std::optional<send_packet> c = awaiting_packets[cmd_seq]->consume();
             if (!c.has_value())
@@ -200,19 +222,17 @@ struct basic_packet_handler
 
         std::lock_guard<std::mutex> m{awaitng_packets_mutex};
         size_t erased = awaiting_packets.erase(cmd_seq);
-        logger.trace("Erasing: %lu", erased);
-        on_exit();
+        logger.trace("Done packet handling for cmd: %lu", cmd_seq);
+
+        return get_result();
     }
 };
 
-struct hello_packet_handler : basic_packet_handler
+struct hello_packet_handler : basic_packet_handler<std::vector<available_server>>
 {
-    std::promise<std::vector<available_server>> prom;
+    using basic_packet_handler::basic_packet_handler;
+protected:
     std::vector<available_server> servers;
-
-    hello_packet_handler(std::promise<std::vector<available_server>> promise) {
-        prom = std::move(promise);
-    }
 
     bool on_packet_receive(send_packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::cmplx);
@@ -228,19 +248,16 @@ struct hello_packet_handler : basic_packet_handler
         return false;
     }
 
-    void on_exit() override {
-        prom.set_value(std::move(servers));
+    std::vector<available_server> get_result() override {
+        return std::move(servers);
     }
 };
 
-struct list_packet_handler : basic_packet_handler
+struct list_packet_handler : basic_packet_handler<std::vector<search_entry>>
 {
-    std::promise<std::vector<search_entry>> prom;
-    std::vector<search_entry> search_res;
-
-    list_packet_handler(std::promise<std::vector<search_entry>> promise) {
-        prom = std::move(promise);
-    }
+    using basic_packet_handler::basic_packet_handler;
+protected:
+    std::vector<search_entry> search_result;
 
     bool on_packet_receive(send_packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::simpl);
@@ -253,9 +270,9 @@ struct list_packet_handler : basic_packet_handler
             while (*p && *p != '\n')
                 ++p;
 
-            search_res.emplace_back(
+            search_result.emplace_back(
                 search_entry{std::string{(char const*)str, (size_t)(p - str)},
-                             packet.from_addr.sin_addr});
+                             packet.from_addr});
 
             if (*p == '\n')
                 ++p;
@@ -265,33 +282,79 @@ struct list_packet_handler : basic_packet_handler
         return false;
     }
 
-    void on_exit() override {
-        prom.set_value(std::move(search_res));
+    std::vector<search_entry> get_result() override {
+        return std::move(search_result);
     }
 };
 
-static void handle_response_list(send_packet const& packet)
+// TODO: rename?
+struct accept_msg_content
 {
-    logger.trace_packet("Received from", packet, cmd_type::simpl);
+    sockaddr_in uaddr;
+    uint64 awaiting_port_num;
+};
 
-    // TODO: Watch out for more than one \n in a row.
-    uint8 const* str = &packet.cmd.simpl.data[0];
-    while (*str)
-    {
-        uint8 const* p = str;
-        while (*p && *p != '\n')
-            ++p;
+struct add_packet_handler : basic_packet_handler<std::optional<accept_msg_content>>
+{
+    using basic_packet_handler::basic_packet_handler;
+protected:
+    // Non-null if one server has agree to take the file.
+    std::optional<accept_msg_content> result = {};
 
-        last_search_result.emplace_back(
-            search_entry{std::string{(char const*)str, (size_t)(p - str)},
-                         packet.from_addr.sin_addr});
+    bool on_packet_receive(send_packet const& packet) override {
 
-        if (*p == '\n')
-            ++p;
-        str = p;
+        // If we've got one reposne, we dont have to wait for more.
+        if (packet.cmd.check_header("CAN_ADD"))
+        {
+            // TODO: SANITIZE THE PACKET!
+            logger.trace_packet("Received", packet, cmd_type::cmplx);
+
+            result = accept_msg_content{packet.from_addr, packet.cmd.cmplx.get_param()};
+            return true;
+        }
+        else if (packet.cmd.check_header("NO_WAY"))
+        {
+            // TODO: SANITIZE THE PACKET!
+            logger.trace_packet("Received", packet, cmd_type::simpl);
+            return true;
+        }
+
+        return false;
     }
-}
 
+    std::optional<accept_msg_content> get_result() override {
+        return std::move(result);
+    }
+};
+
+struct get_packet_handler : basic_packet_handler<std::optional<accept_msg_content>>
+{
+    using basic_packet_handler::basic_packet_handler;
+protected:
+    // Non-null if one server has agree to take the file.
+    std::optional<accept_msg_content> result = {};
+
+    bool on_packet_receive(send_packet const& packet) override {
+        // TODO: SANITIZE THE PACKET!
+
+        // If we've got one reposne, we dont have to wait for more.
+        if (packet.cmd.check_header("CONNECT_ME"))
+        {
+            logger.trace_packet("Received", packet, cmd_type::cmplx);
+
+            result = accept_msg_content{packet.from_addr, packet.cmd.cmplx.get_param()};
+            return true;
+        }
+
+        return false;
+    }
+
+    std::optional<accept_msg_content> get_result() override {
+        return std::move(result);
+    }
+};
+
+#if 0
 // This adds a work queue to the awaiting_packets map. For now every arriving
 // packet with the seq_cmd equal to one specified will go to the created work
 // queue. Returns a pointer to the work queue.
@@ -307,6 +370,7 @@ work_queue<send_packet>* subscribe_for_packets(uint64 cmd_seq)
 
     return awaiting_packets[cmd_seq].get();
 }
+#endif
 
 template<typename FUNC>
 void receive_packets(uint64 cmd_seq, FUNC functor)
@@ -390,82 +454,73 @@ void packets_thread(int sock, int interfd)
     }
 }
 
-bool try_upload_file(int sock,
+void try_upload_file(int sock,
                      sockaddr_in remote_address,
                      std::string filename,
                      std::vector<uint8> file_data)
 {
     logger.trace("Fetching the list");
     uint64 fetch_packet_id = cmd_seq_counter++;
-    subscribe_for_packets(fetch_packet_id);
-    auto[request, size] = cmd::make_simpl("HELLO", fetch_packet_id, 0, 0);
+    hello_packet_handler ph{fetch_packet_id};
+    auto[request, size] = command::make_simpl("HELLO", fetch_packet_id, 0, 0);
     logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
     send_dgram(sock, remote_address, request.bytes, size);
 
-    std::promise<std::vector<available_server>> promise;
-    std::future<std::vector<available_server>> future = promise.get_future();
-    hello_packet_handler ph{std::move(promise)};
-    ph.receive_packets(fetch_packet_id);
-
-    future.wait();
-    available_servers.clear();
-    std::vector<available_server> servers{std::move(future.get())};
+    std::vector<available_server> servers = ph.receive_packets(fetch_packet_id);
     std::sort(servers.begin(), servers.end(),
               [](auto const& x, auto const& y) {
                   return x.free_space > y.free_space;
               });
 
     logger.trace("Got %lu servers. Querying...", servers.size());
-    bool server_agreed = false;
-    sockaddr_in agreed_server_uaddr;
-    uint64 agreed_server_port_num;
+    std::optional<accept_msg_content> server_agreement = {};
     for(auto&& serv : servers)
     {
         uint64 packet_id = cmd_seq_counter++;
-        auto[request, size] = cmd::make_cmplx(
-            "ADD", packet_id, file_data.size(), (uint8 const*)filename.c_str(), filename.size());
+        auto[request, size] = command::make_cmplx(
+            "ADD", packet_id, file_data.size(),
+            (uint8 const*)filename.c_str(),
+            filename.size());
 
-        subscribe_for_packets(packet_id);
+        add_packet_handler ph{packet_id};
         logger.trace_packet("Sending to", send_packet{request, serv.uaddr}, cmd_type::cmplx);
         send_dgram(sock, serv.uaddr, request.bytes, size);
 
-        receive_packets(
-            packet_id,
-            [&](send_packet const& packet) {
-                if (packet.cmd.check_header("CAN_ADD"))
-                {
-                    logger.trace_packet("Received", packet, cmd_type::cmplx);
+        server_agreement = ph.receive_packets(packet_id);
 
-                    server_agreed = true;
-                    agreed_server_uaddr = serv.uaddr;
-                    agreed_server_port_num = packet.cmd.cmplx.get_param();
-                }
-                else if (packet.cmd.check_header("NO_WAY"))
-                {
-                    logger.trace_packet("Received", packet, cmd_type::simpl);
-                }
-            });
-
-        if (server_agreed)
+        if (server_agreement)
         {
             logger.trace("Found server that agreeded to store a file");
             break;
         }
     }
 
-    if (server_agreed)
+    if (server_agreement)
     {
         char port_buffer[32];
-        sprintf(port_buffer, "%lu", agreed_server_port_num);
+        sprintf(port_buffer, "%lu", server_agreement->awaiting_port_num);
         logger.trace("Starting TCP conn at port %s", port_buffer);
-        send_file_over_tcp(inet_ntoa(agreed_server_uaddr.sin_addr), port_buffer, file_data);
-        return true; // TODO: TCP CAN FAIL!
+        bool upload_success = send_file_over_tcp(
+            inet_ntoa(server_agreement->uaddr.sin_addr),
+            port_buffer,
+            file_data);
+
+        if (upload_success)
+        {
+            logger.println("File {%s} uploaded (%s:%s)",
+                           filename.c_str(),
+                           "foo", "bar");
+        }
+        else
+        {
+            logger.println("File %s uploading failed (%s:%s) %s",
+                           filename.c_str(),
+                           "foo", "bar",
+                           "life hates me");
+        }
     }
     else
-    {
-        logger.trace("None of the servers agreeded");
-        return false;
-    }
+        logger.println("File %s too big", filename.c_str());
 }
 
 int
@@ -582,21 +637,14 @@ main(int argc, char** argv)
         else if (command == "discover")
         {
             uint64 packet_id = cmd_seq_counter++;
-            subscribe_for_packets(packet_id);
-            auto[request, size] = cmd::make_simpl("HELLO", packet_id, 0, 0);
+            hello_packet_handler ph{packet_id};
+
+            auto[request, size] = command::make_simpl("HELLO", packet_id, 0, 0);
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
 
-            std::promise<std::vector<available_server>> promise;
-            std::future<std::vector<available_server>> future = promise.get_future();
-            hello_packet_handler ph{std::move(promise)};
-
-            // This will block the main thread.
-            ph.receive_packets(packet_id);
-
-            future.wait();
             available_servers.clear();
-            available_servers = future.get();
+            available_servers = ph.receive_packets(packet_id);
             for (auto&& i : available_servers)
             {
                 std::string uaddr = inet_ntoa(i.uaddr.sin_addr); // TODO: Handle the case, when these fail!
@@ -608,24 +656,18 @@ main(int argc, char** argv)
         else if (command == "search")
         {
             uint64 packet_id = cmd_seq_counter++;
-            subscribe_for_packets(packet_id);
+            list_packet_handler ph{packet_id};
 
-            auto[request, size] = cmd::make_simpl("LIST", packet_id, (uint8 const*)param.data(), param.size());
+            auto[request, size] = command::make_simpl("LIST", packet_id, (uint8 const*)param.data(), param.size());
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
 
-            std::promise<std::vector<search_entry>> promise;
-            std::future<std::vector<search_entry>> future = promise.get_future();
-            list_packet_handler ph{std::move(promise)};
-
             // This will block the main thread.
-            ph.receive_packets(packet_id);
-
             last_search_result.clear();
-            last_search_result = future.get();
+            last_search_result = ph.receive_packets(packet_id);
             for (auto&& i : last_search_result)
             {
-                logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_unicast_addr));
+                logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_uaddr.sin_addr));
             }
         }
         else if (command == "remove")
@@ -637,7 +679,7 @@ main(int argc, char** argv)
             }
 
             uint64 packet_id = cmd_seq_counter++;
-            auto[request, size] = cmd::make_simpl("DEL", packet_id, (uint8 const*)param.data(), param.size());
+            auto[request, size] = command::make_simpl("DEL", packet_id, (uint8 const*)param.data(), param.size());
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
         }
@@ -663,10 +705,72 @@ main(int argc, char** argv)
                 continue;
             }
 
-            uint64 packet_id = cmd_seq_counter++;
-            auto[request, size] = cmd::make_simpl("GET", packet_id, (uint8 const*)param.data(), param.size());
-            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
-            send_dgram(sock, remote_address, request.bytes, size);
+            workers.push_back(
+                std::thread{
+                    [](int sock, search_entry found_server, std::string filename){
+                        uint64 packet_id = cmd_seq_counter++;
+                        get_packet_handler ph{packet_id};
+                        auto[request, size] = command::make_simpl(
+                            "GET",
+                            packet_id,
+                            (uint8 const*)found_server.filename.c_str(),
+                            found_server.filename.size());
+
+                        logger.trace_packet("Sending to",
+                                            send_packet{request, found_server.server_uaddr},
+                                            cmd_type::simpl);
+
+                        send_dgram(sock, found_server.server_uaddr, request.bytes, size);
+
+                        std::optional<accept_msg_content> server_agreement = ph.receive_packets(packet_id);
+                        bool failed = false;
+                        std::string fail_reason = "";
+                        std::string uaddr_str = "";
+                        std::string port_str = "";
+
+                        if (!server_agreement)
+                        {
+                            failed = true;
+                            fail_reason = "Server did not respond";
+                        }
+
+                        if (!failed)
+                        {
+                            // TODO: OUTDIR!!
+                            fs::path out{"."};
+                            out /= "outdir";
+                            out /= filename;
+
+                            port_str = std::to_string(server_agreement->awaiting_port_num);
+                            uaddr_str = inet_ntoa(server_agreement->uaddr.sin_addr);
+
+                            auto[success, reason] = receive_file_over_tcp(uaddr_str.c_str(),
+                                                                          port_str.c_str(),
+                                                                          out);
+
+                            if (!success)
+                            {
+                                failed = true;
+                                fail_reason = std::move(reason);
+                            }
+                        }
+
+                        if (failed)
+                        {
+                            logger.println("File %s downloading failed (%s:%s) %s",
+                                           filename.c_str(),
+                                           uaddr_str.c_str(),
+                                           port_str.c_str(),
+                                           fail_reason.c_str());
+                        }
+                        else
+                        {
+                            logger.println("File %s downloaded (%s:%d)",
+                                           filename.c_str(),
+                                           inet_ntoa(server_agreement->uaddr.sin_addr),
+                                           server_agreement->awaiting_port_num);
+                        }
+                    }, sock, *it, std::string(param)});
         }
         else if (command == "upload")
         {

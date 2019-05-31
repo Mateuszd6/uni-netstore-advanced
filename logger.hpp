@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 
 #include <cassert>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
