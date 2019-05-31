@@ -32,6 +32,7 @@ namespace fs = std::filesystem;
 #include "common.hpp"
 #include "work_queue.hpp"
 #include "cmd.hpp"
+#include "connection.hpp"
 
 #define TTL_VALUE 4
 
@@ -107,63 +108,54 @@ static std::atomic_uint64_t cmd_seq_counter{0};
 static std::vector<search_entry> last_search_result{};
 static std::vector<available_server> available_servers{};
 
-void send_file_over_tcp(char const* addr,
+bool send_file_over_tcp(char const* addr,
                         char const* port,
                         std::vector<uint8> data)
 {
     logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
 
     int sock;
-    struct addrinfo addr_hints;
-    struct addrinfo *addr_result;
-
-    int err, seq_no = 0, number;
+    addrinfo addr_hints;
+    addrinfo *addr_result;
 
     // 'converting' host/port in string to struct addrinfo
     memset(&addr_hints, 0, sizeof(addrinfo));
-    addr_hints.ai_family = AF_INET; // IPv4
+    addr_hints.ai_family = AF_INET;
     addr_hints.ai_socktype = SOCK_STREAM;
     addr_hints.ai_protocol = IPPROTO_TCP;
-    err = getaddrinfo(addr, port, &addr_hints, &addr_result);
-    if (err == EAI_SYSTEM) // system error
+    if (getaddrinfo(addr, port, &addr_hints, &addr_result) != 0)
         logger.syserr("getaddrinfo");
-    else if (err != 0) // other error (host not found, etc.)
-        logger.fatal("getaddrinfo");
 
     // initialize socket according to getaddrinfo results
     sock = socket(addr_result->ai_family, addr_result->ai_socktype, addr_result->ai_protocol);
     if (sock < 0)
         logger.syserr("socket");
 
+    timeval tv = chrono_to_posix(2s); // TODO: Set timeout!
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+
     // connect socket to the server
     if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) < 0)
     {
-        logger.syserr("connect");
+        logger.trace("Cound not connect to the server");
+        safe_close(sock);
+        return false;
     }
 
     freeaddrinfo(addr_result);
 
-#if 1
-    // TODO: Use write_well
-    if (write(sock, data.data(), data.size()) != data.size())
-        logger.syserr("partial / failed write");
-#else
-    sleep(20);
-#endif
-
-    if (close(sock) < 0) // socket would be closed anyway when the program ends
-        logger.syserr("close");
-}
-
-// TODO: There is a copy in the server libs!
-void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
-{
-    if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
+    if (send_stream(sock, data.data(), data.size()) != data.size())
     {
-        logger.syserr("sendto");
+        logger.trace("Error sending the file");
+        safe_close(sock);
+        return false;
     }
+
+    safe_close(sock);
+    return true;
 }
 
+#if 0
 static void handle_response_hello(send_packet const& packet)
 {
     logger.trace_packet("Received from", packet, cmd_type::cmplx);
@@ -178,6 +170,7 @@ static void handle_response_hello(send_packet const& packet)
     available_servers.emplace_back(
         available_server{packet.from_addr, mcast_addr, packet.cmd.cmplx.get_param()});
 }
+#endif
 
 std::mutex awaitng_packets_mutex{};
 std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
@@ -370,8 +363,8 @@ void packets_thread(int sock, int interfd)
         {
             logger.trace("Error: %s(%d)", strerror(errno), errno);
             logger.trace("Closing!");
-            close(sock);
-            exit(1);
+            safe_close(sock);
+            exit(1); // TODO: Investigate
         }
         else if (rcv_len == 0) // TODO: Socket has been closed (How do we
                                //       even get here when mutlicasting)?
@@ -648,6 +641,33 @@ main(int argc, char** argv)
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
         }
+        else if (command == "fetch")
+        {
+            if (param == "")
+            {
+                logger.trace("Cannot upload because of the empty param!");
+                continue;
+            }
+
+            auto it = std::find_if(
+                last_search_result.begin(),
+                last_search_result.end(),
+                [&](auto x) {
+                    return x.filename == param;
+                });
+
+            if (it == last_search_result.end())
+            {
+                logger.println("%.*s does not exists in the previous search",
+                               param.size(), param.data());
+                continue;
+            }
+
+            uint64 packet_id = cmd_seq_counter++;
+            auto[request, size] = cmd::make_simpl("GET", packet_id, (uint8 const*)param.data(), param.size());
+            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
+            send_dgram(sock, remote_address, request.bytes, size);
+        }
         else if (command == "upload")
         {
             if (param == "")
@@ -671,10 +691,10 @@ main(int argc, char** argv)
                                 std::move(filename), std::move(data)});
             }
             else
-                logger.trace("File %s does not exist", upload_file_path.c_str());
+                logger.println("File %s does not exist", upload_file_path.c_str());
         }
     }
 
     // koniec
-    close(sock);
+    safe_close(sock);
 }
