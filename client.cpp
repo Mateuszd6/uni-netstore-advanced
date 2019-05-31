@@ -36,6 +36,17 @@ namespace fs = std::filesystem;
 
 #define TTL_VALUE 4
 
+struct client_options
+{
+    std::optional<std::string> mcast_addr = {};
+    std::optional<std::string> out_fldr = {};
+    std::optional<uint32> cmd_port = {};
+    std::optional<uint32> timeout = 5;
+};
+
+// global server options.
+static client_options co;
+
 // We could use iostreams here, but lets not do this, just for consistency.
 std::string get_input_line()
 {
@@ -113,9 +124,7 @@ std::pair<bool, std::string> receive_file_over_tcp(char const* addr,
 {
     logger.trace("Receiving file %s from %s:%s", out_file_path.c_str(), addr, port);
 
-    // TODO: Set timeout!
-    // TODO: Set timeout!
-    int sock = connect_to_stream(addr, port, 3s);
+    int sock = connect_to_stream(addr, port, chrono::seconds{*co.timeout});
     if (sock < 0)
         return {false, "Cound not connect to the server"};
 
@@ -154,9 +163,7 @@ bool send_file_over_tcp(char const* addr,
 {
     logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
 
-    // TODO: Set timeout!
-    // TODO: Set timeout!
-    int sock = connect_to_stream(addr, port, 3s);
+    int sock = connect_to_stream(addr, port, chrono::seconds{*co.timeout});
     if (sock < 0)
     {
         logger.trace("Cound not connect to the server");
@@ -203,8 +210,7 @@ public:
         assert(awaiting_packets.count(cmd_seq) == 0);
         awaiting_packets.emplace(
             cmd_seq,
-            // TODO: TIMEOUT!!!
-            std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() + 2s));
+            std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() + chrono::seconds{*co.timeout}));
     }
 
     T receive_packets(uint64 cmd_seq) {
@@ -523,9 +529,72 @@ void try_upload_file(int sock,
         logger.println("File %s too big", filename.c_str());
 }
 
+client_options parse_args(int argc, char** argv)
+{
+    client_options retval{};
+    for (int i = 1; i < argc; ++i)
+    {
+        uint32 arg_hashed = strhash(argv[i]);
+
+        if (i == argc - 1) {
+            // As every switch arg takes one followup, we know that the
+            // arguments are ill-formed. TODO?
+            break;
+        }
+
+        // The constexpr trick will speed up string lookups, as we don't have to
+        // invoke string compare.
+        switch (arg_hashed)
+        {
+            case strhash("-g"): // MCAST_ADDR
+            {
+                ++i;
+                retval.mcast_addr = std::string{argv[i]};
+            } break;
+
+            case strhash("-p"): // CMD_PORT
+            {
+                ++i;
+                int32 port = std::stoi(argv[i]); // TODO: Validate value?
+                retval.cmd_port = port;
+            } break;
+
+            case strhash("-o"): // OUT_FLDR
+            {
+                ++i;
+                retval.out_fldr = std::string{argv[i]};
+            } break;
+
+            case strhash("-t"): // TIMEOUT
+            {
+                // TODO: MAX allowed is 300!
+                ++i;
+                int32 timeout = std::stoi(argv[i]); // TODO: Validate value?
+                retval.timeout = timeout;
+            } break;
+        }
+    }
+
+    // If any of the fields is null, a required field was not set, so we exit.
+    if (!retval.mcast_addr || !retval.out_fldr || !retval.cmd_port || !retval.timeout)
+    {
+        logger.trace("Nope");
+        exit(1);
+    }
+
+    return retval;
+}
+
 int
 main(int argc, char** argv)
 {
+    co = parse_args(argc, argv);
+    logger.trace("OPTIONS:");
+    logger.trace("  MCAST_ADDR = %s", co.mcast_addr->c_str());
+    logger.trace("  CMD_PORT = %d", *co.cmd_port);
+    logger.trace("  OUT_FLDR = %s", co.out_fldr->c_str());
+    logger.trace("  TIMEOUT = %d", *co.timeout);
+
     // argumenty wywołania programu
     char* remote_dotted_address;
     in_port_t remote_port;
@@ -552,12 +621,10 @@ main(int argc, char** argv)
     if (sock < 0)
         logger.syserr("socket");
 
-    // uaktywnienie rozgłaszania (ang. broadcast)
     optval = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
         logger.syserr("setsockopt broadcast");
 
-    // ustawienie TTL dla datagramów rozsyłanych do grupy
     optval = TTL_VALUE;
     if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (void*)&optval, sizeof optval) < 0)
         logger.syserr("setsockopt multicast ttl");
@@ -582,8 +649,7 @@ main(int argc, char** argv)
     if (inet_aton(remote_dotted_address, &remote_address.sin_addr) == 0)
         logger.syserr("inet_aton");
 
-    // ustawienie timeoutu
-    timeval tv = chrono_to_posix(5s);
+    timeval tv = chrono_to_posix(chrono::seconds{*co.timeout});
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
 
     // HACK: We can't really use signalfd as we used in the server to stop the

@@ -33,8 +33,8 @@ struct server_options
     std::optional<std::string> mcast_addr = {};
     std::optional<std::string> shrd_fldr = {};
     std::optional<int64> max_space = 52428800;
-    std::optional<int32> cmd_port = {};
-    std::optional<int32> timeout = 5;
+    std::optional<uint32> cmd_port = {};
+    std::optional<uint32> timeout = 5;
 };
 
 // we will use this mutex to make sure, that only one thread is accessing the
@@ -92,6 +92,7 @@ server_options parse_args(int argc, char const** argv)
 
             case strhash("-t"): // TIMEOUT
             {
+                // TODO: MAX allowed is 300!
                 ++i;
                 int32 timeout = std::stoi(argv[i]); // TODO: Validate value?
                 retval.timeout = timeout;
@@ -533,8 +534,6 @@ static void handle_request_add(int sock, send_packet const& packet, ssize_t msg_
     fs::path file_path{current_folder / filename_sv};
     if (try_alloc_file(file_path, (ssize_t)packet.cmd.cmplx.get_param()))
     {
-        // The init happens in the main thread so that we know the port
-        // id. Then we start a new thread giving it a created socket.
         auto[socket, port] = init_stream_conn();
 
         logger.trace("Listening on port %hu", ntohs(port));
