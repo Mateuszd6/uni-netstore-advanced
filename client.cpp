@@ -243,13 +243,20 @@ protected:
     bool on_packet_receive(send_packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::cmplx);
 
-        // TODO: Data sent _can_ be incorrect!!! dont syserr
-        in_addr mcast_addr;
-        if (inet_aton((char const*)packet.cmd.cmplx.get_data(), &mcast_addr) == 0)
-            logger.syserr("inet_aton");
+        // TODO: Validate the size of a msg.
 
-        servers.emplace_back(
-            available_server{packet.from_addr, mcast_addr, packet.cmd.cmplx.get_param()});
+
+        // TODO: Use strview because we use zeros that are not part of the message.
+        auto mcast_addr = string_to_addr((char const*)packet.cmd.cmplx.get_data());
+        if (!mcast_addr)
+        {
+            logger.pckg_error(packet.from_addr, "Address returned by server is invalid");
+        }
+        else
+        {
+            servers.emplace_back(
+                available_server{packet.from_addr, *mcast_addr, packet.cmd.cmplx.get_param()});
+        }
 
         return false;
     }
@@ -512,7 +519,7 @@ void try_upload_file(int sock,
 
     if (server_agreement)
     {
-        std::string addr_str = inet_ntoa(server_agreement->uaddr.sin_addr);
+        std::string addr_str = addr_to_string(server_agreement->uaddr.sin_addr);
         std::string port_str = std::to_string(server_agreement->awaiting_port_num);
 
         logger.trace("Starting TCP conn at port %s", port_str.c_str());
@@ -601,24 +608,11 @@ main(int argc, char** argv)
     logger.trace("  OUT_FLDR = %s", co.out_fldr->c_str());
     logger.trace("  TIMEOUT = %d", *co.timeout);
 
-    // argumenty wywołania programu
-    char const* remote_dotted_address;
-    in_port_t remote_port;
-
     // zmienne i struktury opisujące gniazda
     int sock, optval;
     //  struct sockaddr_in local_address;
     sockaddr_in remote_address, local_address;
-    unsigned int remote_len;
 
-    // zmienne obsługujące komunikację
-    size_t length;
-    int i;
-
-    remote_dotted_address = co.mcast_addr->c_str();
-    remote_port = (in_port_t)(* co.cmd_port);
-
-    // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
         logger.syserr("socket");
@@ -631,25 +625,25 @@ main(int argc, char** argv)
     if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (void*)&optval, sizeof optval) < 0)
         logger.syserr("setsockopt multicast ttl");
 
-    // zablokowanie rozsyłania grupowego do siebie
 #if 0
     optval = 0;
     if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
         syserr("setsockopt loop");
 #endif
 
-    // podpięcie się pod lokalny adres i port
+    // bind to local address
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
     local_address.sin_port = htons(0);
     if (bind(sock, (sockaddr*)&local_address, sizeof local_address) < 0)
         logger.syserr("bind");
 
-    // ustawienie adresu i portu odbiorcy
+    auto parsed_addr = string_to_addr(co.mcast_addr->c_str());
+    if (!parsed_addr)
+        logger.fatal("Specified address is invalid");
     remote_address.sin_family = AF_INET;
-    remote_address.sin_port = htons(remote_port);
-    if (inet_aton(remote_dotted_address, &remote_address.sin_addr) == 0)
-        logger.syserr("inet_aton");
+    remote_address.sin_port = htons(* co.cmd_port);
+    remote_address.sin_addr = *parsed_addr;
 
     timeval tv = chrono_to_posix(chrono::seconds{*co.timeout});
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
@@ -718,20 +712,17 @@ main(int argc, char** argv)
             logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
             send_dgram(sock, remote_address, request.bytes, size);
 
+            // TODO: VALIDATE DATA!?
+
             available_servers.clear();
             available_servers = ph.receive_packets(packet_id);
-            // TODO: There is probobly no way to abort this packet receiving.
-#if 0
-            if (ph.aborted) {
-                logger.trace("packet handling aborted!");
-                return;
-            }
-#endif
+            if (ph.aborted)
+                continue;
 
             for (auto&& i : available_servers)
             {
-                std::string uaddr = inet_ntoa(i.uaddr.sin_addr); // TODO: Handle the case, when these fail!
-                std::string maddr = inet_ntoa(i.maddr);
+                std::string uaddr = addr_to_string(i.uaddr.sin_addr);
+                std::string maddr = addr_to_string(i.maddr);
 
                 logger.println("Found %s (%s) with free space %lu", uaddr.c_str(), maddr.c_str(), i.free_space);
             }
@@ -757,7 +748,7 @@ main(int argc, char** argv)
 
             for (auto&& i : last_search_result)
             {
-                logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_uaddr.sin_addr));
+                logger.println("%s (%s)", i.filename.c_str(), addr_to_string(i.server_uaddr.sin_addr));
             }
         }
         else if (command == "remove")
@@ -834,8 +825,8 @@ main(int argc, char** argv)
                             fs::path out{* co.out_fldr};
                             out /= filename;
 
+                            uaddr_str = addr_to_string(server_agreement->uaddr.sin_addr);
                             port_str = std::to_string(server_agreement->awaiting_port_num);
-                            uaddr_str = inet_ntoa(server_agreement->uaddr.sin_addr);
 
                             auto[success, reason] = receive_file_over_tcp(uaddr_str.c_str(),
                                                                           port_str.c_str(),
@@ -860,7 +851,7 @@ main(int argc, char** argv)
                         {
                             logger.println("File %s downloaded (%s:%d)",
                                            filename.c_str(),
-                                           inet_ntoa(server_agreement->uaddr.sin_addr),
+                                           addr_to_string(server_agreement->uaddr.sin_addr).c_str(),
                                            server_agreement->awaiting_port_num);
                         }
                     }, sock, *it, std::string(param)});

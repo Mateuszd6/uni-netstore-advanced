@@ -14,6 +14,27 @@ void safe_close(int sock)
         logger.syserr("close");
 }
 
+std::optional<in_addr> string_to_addr(std::string const& str)
+{
+    in_addr retval;
+    if (inet_aton(str.c_str(), &retval) == 0)
+        return {};
+
+    return retval;
+}
+
+std::string addr_to_string(in_addr addr)
+{
+    // Since inet_ntoa returns a pointer to the buffer, which content is
+    // replaced with another call, we must sync the inte_ntoa calls. After the
+    // call we copy the result and return as std::string.
+    static std::mutex ntoa_mutex{};
+
+    std::lock_guard<std::mutex> m{ntoa_mutex};
+    std::string retval = inet_ntoa(addr);
+    return retval;
+}
+
 // Open up TCP socket on a random port.
 std::pair<int, in_port_t> init_stream_conn()
 {
