@@ -66,6 +66,10 @@ public:
         aborted = true;
         cv.notify_all();
     }
+
+    bool was_aborted() {
+        return aborted;
+    }
 };
 
 #endif // WORK_QUEUE_HPP

@@ -118,9 +118,8 @@ static std::atomic_uint64_t cmd_seq_counter{0};
 static std::vector<search_entry> last_search_result{};
 static std::vector<available_server> available_servers{};
 
-std::pair<bool, std::string> receive_file_over_tcp(char const* addr,
-                                                   char const* port,
-                                                   fs::path out_file_path)
+std::pair<bool, std::string>
+receive_file_over_tcp(char const* addr, char const* port, fs::path out_file_path)
 {
     logger.trace("Receiving file %s from %s:%s", out_file_path.c_str(), addr, port);
 
@@ -157,29 +156,26 @@ std::pair<bool, std::string> receive_file_over_tcp(char const* addr,
     return {true, ""};
 }
 
-bool send_file_over_tcp(char const* addr,
-                        char const* port,
-                        std::vector<uint8> data)
+std::pair<bool, std::string>
+send_file_over_tcp(char const* addr, char const* port, std::vector<uint8> data)
 {
     logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
 
     int sock = connect_to_stream(addr, port, chrono::seconds{*co.timeout});
     if (sock < 0)
     {
-        logger.trace("Cound not connect to the server");
-        return false;
+        return {false, "Cound not connect to the server"};
     }
 
     if (send_stream(sock, data.data(), data.size()) != data.size())
     {
-        logger.trace("Error sending the file");
         safe_close(sock);
-        return false;
+        return {false, "Error sending the file"};
     }
 
     logger.trace("Sending successfull");
     safe_close(sock);
-    return true;
+    return {true, ""};
 }
 
 std::mutex awaitng_packets_mutex{};
@@ -189,8 +185,6 @@ template<typename T>
 struct basic_packet_handler
 {
 protected:
-    uint64 cmd_seq;
-
     // This fucntion is done every time packet is received. If it returns true,
     // then no more packets will be consumed.
     virtual bool on_packet_receive(send_packet const& packet) { return false; }
@@ -200,8 +194,11 @@ protected:
     virtual T get_result() { return T{}; }
 
 public:
-    basic_packet_handler(uint64 id) {
-        cmd_seq = id;
+    uint64 const cmd_seq;
+    bool aborted;
+
+    basic_packet_handler(uint64 id) : cmd_seq{id} {
+        aborted = false;
 
         // Subscribe for packets:
         std::lock_guard<std::mutex> m{awaitng_packets_mutex};
@@ -215,7 +212,9 @@ public:
 
     T receive_packets(uint64 cmd_seq) {
         for (;;) {
-            std::optional<send_packet> c = awaiting_packets[cmd_seq]->consume();
+            // TODO: Exception handling.
+            // Its safer to use at instread of [], because of the thread safety.
+            std::optional<send_packet> c = awaiting_packets.at(cmd_seq)->consume();
             if (!c.has_value())
             {
                 logger.trace("No more [%lu] packets", cmd_seq);
@@ -227,7 +226,8 @@ public:
         }
 
         std::lock_guard<std::mutex> m{awaitng_packets_mutex};
-        size_t erased = awaiting_packets.erase(cmd_seq);
+        aborted = awaiting_packets.at((uint64 const)cmd_seq)->was_aborted();
+        awaiting_packets.erase(cmd_seq);
         logger.trace("Done packet handling for cmd: %lu", cmd_seq);
 
         return get_result();
@@ -376,7 +376,6 @@ work_queue<send_packet>* subscribe_for_packets(uint64 cmd_seq)
 
     return awaiting_packets[cmd_seq].get();
 }
-#endif
 
 template<typename FUNC>
 void receive_packets(uint64 cmd_seq, FUNC functor)
@@ -400,6 +399,7 @@ void receive_packets(uint64 cmd_seq, FUNC functor)
         logger.trace("Erasing: %lu", erased);
     }
 }
+#endif
 
 void packets_thread(int sock, int interfd)
 {
@@ -473,6 +473,11 @@ void try_upload_file(int sock,
     send_dgram(sock, remote_address, request.bytes, size);
 
     std::vector<available_server> servers = ph.receive_packets(fetch_packet_id);
+    if (ph.aborted) {
+        logger.trace("packet handling aborted!");
+        return;
+    }
+
     std::sort(servers.begin(), servers.end(),
               [](auto const& x, auto const& y) {
                   return x.free_space > y.free_space;
@@ -493,6 +498,10 @@ void try_upload_file(int sock,
         send_dgram(sock, serv.uaddr, request.bytes, size);
 
         server_agreement = ph.receive_packets(packet_id);
+        if (ph.aborted) {
+            logger.trace("packet handling aborted!");
+            return;
+        }
 
         if (server_agreement)
         {
@@ -503,26 +512,28 @@ void try_upload_file(int sock,
 
     if (server_agreement)
     {
-        char port_buffer[32];
-        sprintf(port_buffer, "%lu", server_agreement->awaiting_port_num);
-        logger.trace("Starting TCP conn at port %s", port_buffer);
-        bool upload_success = send_file_over_tcp(
-            inet_ntoa(server_agreement->uaddr.sin_addr),
-            port_buffer,
-            file_data);
+        std::string addr_str = inet_ntoa(server_agreement->uaddr.sin_addr);
+        std::string port_str = std::to_string(server_agreement->awaiting_port_num);
 
-        if (upload_success)
+        logger.trace("Starting TCP conn at port %s", port_str.c_str());
+        auto[success, reason] = send_file_over_tcp(addr_str.c_str(),
+                                                   port_str.c_str(),
+                                                   file_data);
+
+        if (success)
         {
             logger.println("File {%s} uploaded (%s:%s)",
                            filename.c_str(),
-                           "foo", "bar");
+                           addr_str.c_str(),
+                           port_str.c_str());
         }
         else
         {
             logger.println("File %s uploading failed (%s:%s) %s",
                            filename.c_str(),
-                           "foo", "bar",
-                           "life hates me");
+                           addr_str.c_str(),
+                           port_str.c_str(),
+                           reason.c_str());
         }
     }
     else
@@ -596,7 +607,7 @@ main(int argc, char** argv)
     logger.trace("  TIMEOUT = %d", *co.timeout);
 
     // argumenty wywołania programu
-    char* remote_dotted_address;
+    char const* remote_dotted_address;
     in_port_t remote_port;
 
     // zmienne i struktury opisujące gniazda
@@ -609,12 +620,8 @@ main(int argc, char** argv)
     size_t length;
     int i;
 
-    // parsowanie argumentów programu
-    if (argc != 3)
-        logger.fatal("Usage: %s remote_address remote_port", argv[0]);
-
-    remote_dotted_address = argv[1];
-    remote_port = (in_port_t)atoi(argv[2]);
+    remote_dotted_address = co.mcast_addr->c_str();
+    remote_port = (in_port_t)(* co.cmd_port);
 
     // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -694,6 +701,13 @@ main(int argc, char** argv)
             packet_handler.join();
             logger.trace("Joined packet handler!");
 
+            // Abort all work in the work queue.
+            {
+                std::lock_guard<std::mutex> m{awaitng_packets_mutex};
+                for (auto&& it : awaiting_packets)
+                    it.second->abort();
+            }
+
             // Now we can join workers.
             for (auto&& th : workers)
                 th.join();
@@ -711,6 +725,14 @@ main(int argc, char** argv)
 
             available_servers.clear();
             available_servers = ph.receive_packets(packet_id);
+            // TODO: There is probobly no way to abort this packet receiving.
+#if 0
+            if (ph.aborted) {
+                logger.trace("packet handling aborted!");
+                return;
+            }
+#endif
+
             for (auto&& i : available_servers)
             {
                 std::string uaddr = inet_ntoa(i.uaddr.sin_addr); // TODO: Handle the case, when these fail!
@@ -731,6 +753,13 @@ main(int argc, char** argv)
             // This will block the main thread.
             last_search_result.clear();
             last_search_result = ph.receive_packets(packet_id);
+#if 0
+            if (ph.aborted) {
+                logger.trace("packet handling aborted!");
+                return;
+            }
+#endif
+
             for (auto&& i : last_search_result)
             {
                 logger.println("%s (%s)", i.filename.c_str(), inet_ntoa(i.server_uaddr.sin_addr));
@@ -789,6 +818,11 @@ main(int argc, char** argv)
                         send_dgram(sock, found_server.server_uaddr, request.bytes, size);
 
                         std::optional<accept_msg_content> server_agreement = ph.receive_packets(packet_id);
+                        if (ph.aborted) {
+                            logger.trace("packet handling aborted!");
+                            return;
+                        }
+
                         bool failed = false;
                         std::string fail_reason = "";
                         std::string uaddr_str = "";
@@ -802,9 +836,7 @@ main(int argc, char** argv)
 
                         if (!failed)
                         {
-                            // TODO: OUTDIR!!
-                            fs::path out{"."};
-                            out /= "outdir";
+                            fs::path out{* co.out_fldr};
                             out /= filename;
 
                             port_str = std::to_string(server_agreement->awaiting_port_num);
