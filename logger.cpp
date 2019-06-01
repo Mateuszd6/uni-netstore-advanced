@@ -16,7 +16,7 @@ void logger_t::trace(char const* fmt, ...) {
 }
 
 void logger_t::trace_packet(char const* description,
-                            send_packet const& packet,
+                            packet const& packet,
                             cmd_type type)
 {
 #ifdef TRACE
@@ -59,6 +59,7 @@ void logger_t::println(char const* fmt, ...)
     fprintf(stdout, "\n");
 }
 
+[[noreturn]]
 void logger_t::syserr(char const* fmt, ...)
 {
     std::lock_guard<std::mutex> m{logger_mutex};
@@ -78,6 +79,7 @@ void logger_t::syserr(char const* fmt, ...)
     exit(2); // TODO: Use safe exit function!
 }
 
+[[noreturn]]
 void logger_t::fatal(char const* fmt, ...)
 {
     std::lock_guard<std::mutex> m{logger_mutex};

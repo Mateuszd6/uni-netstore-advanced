@@ -7,39 +7,6 @@ command::command()
     clear();
 }
 
-#if 0
-std::pair<command, size_t>
-command::make_simpl(char const* head, uint64 cmd_seq,
-                    uint8 const* data, size_t data_len)
-{
-    command retval{};
-
-    retval.set_head(head);
-    retval.set_cmd_seq(cmd_seq);
-
-    if (data != nullptr)
-        retval.simpl.set_data(data, data_len);
-
-    return { retval,  common_header_size + data_len };
-}
-
-std::pair<command, size_t>
-command::make_cmplx(char const* head, uint64 cmd_seq,
-                    uint64 param_, uint8 const* data, size_t data_len)
-{
-    command retval{};
-
-    retval.set_head(head);
-    retval.set_cmd_seq(cmd_seq);
-    retval.cmplx.set_param(param_);
-
-    if (data != nullptr)
-        retval.cmplx.set_data(data, data_len);
-
-    return { retval,  common_header_size + sizeof(uint64) + data_len };
-}
-#endif
-
 char const* command::get_head() const
 {
     return &(head[0]);
@@ -47,7 +14,7 @@ char const* command::get_head() const
 
 void command::set_head(char const* val)
 {
-    int32 val_len = strlen(val);
+    size_t val_len = strlen(val);
     assert(val_len <= 10);
 
     bzero(head, 10);
@@ -108,7 +75,7 @@ void cmd_cmplx_t::set_param(uint64 val)
 
 bool command::check_header(char const* usr_head) const
 {
-    int32 usr_head_len = strlen(head);
+    size_t usr_head_len = strlen(head);
     assert(usr_head_len <= 10);
 
     if (memcmp(head, usr_head, usr_head_len) != 0)

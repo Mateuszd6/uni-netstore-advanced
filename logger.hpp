@@ -24,12 +24,14 @@ private:
 public:
     void trace(char const* fmt, ...);
 
-    void trace_packet(char const* description, send_packet const& packet, cmd_type type);
+    void trace_packet(char const* description, packet const& packet, cmd_type type);
 
     void println(char const* fmt, ...);
 
+    [[noreturn]]
     void syserr(char const* fmt, ...);
 
+    [[noreturn]]
     void fatal(char const* fmt, ...);
 
     void pckg_error(sockaddr_in const& addr, char const* reason);

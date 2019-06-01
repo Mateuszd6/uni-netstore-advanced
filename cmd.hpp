@@ -85,29 +85,29 @@ static_assert(sizeof(command::bytes) == sizeof(command));
 static_assert(sizeof(command::bytes) == 10 + sizeof(uint64) + sizeof(command::simpl));
 static_assert(sizeof(command::bytes) == 10 + sizeof(uint64) + sizeof(command::cmplx));
 
-struct send_packet
+struct packet
 {
     command cmd;
     size_t msg_len;
     sockaddr_in addr;
     socklen_t addr_len;
 
-    send_packet() : cmd{}, addr{} {
+    packet() : cmd{}, addr{} {
         addr_len = sizeof(addr);
     }
 
     // TODO: Fix naming
-    send_packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
+    packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
         this->cmd = cmd_;
         this->msg_len = msg_len_;
         this->addr = addr_;
         this->addr_len = sizeof(addr_);
     }
 
-    static send_packet make_simpl(char const* head, uint64 cmd_seq,
+    static packet make_simpl(char const* head, uint64 cmd_seq,
                                   uint8 const* data, size_t data_len,
                                   sockaddr_in addr) {
-        send_packet retval{};
+        packet retval{};
         retval.addr = addr;
         retval.msg_len = command::simpl_head_size + data_len;
 
@@ -119,11 +119,11 @@ struct send_packet
         return retval;
     }
 
-    static send_packet make_cmplx(char const* head, uint64 cmd_seq,
+    static packet make_cmplx(char const* head, uint64 cmd_seq,
                                   uint64 param,
                                   uint8 const* data, size_t data_len,
                                   sockaddr_in addr) {
-        send_packet retval{};
+        packet retval{};
         retval.addr = addr;
         retval.msg_len = command::cmplx_head_size + data_len;
 

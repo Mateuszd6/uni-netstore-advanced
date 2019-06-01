@@ -1,14 +1,14 @@
 # TODO: Better make for boost libs?
 .PHONY: all debug release clean
 
-CC=g++
+CC=clang++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -fno-omit-frame-pointer
 RELEASE_FLAGS=-O3 -DNDEBUG
 INCLUDE_FLAGS=-I.
 LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
-WARN_FLAGS=-Wall -Wextra -Wshadow -Wunused-function -Wunused-label -Wunused-value
+WARN_FLAGS=-Wall -Wextra -Wshadow #-Weverything -Wno-old-style-cast -Wno-sign-conversion -Wno-c++98-compat
 
 # students has completly broken sanitizer dependencies.
 SANITIZERS=#-fsanitize=undefined
@@ -22,10 +22,10 @@ SERVER_EXE=netstore-server
 
 #TODO: Swap the targets, so that release is default.
 
-debug: CFLAGS=$(COMMON_CFLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
+debug: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
 debug: all
 
-release: CFLAGS=$(COMMON_CFLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
+release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
 release: all
 
 .cpp.o:

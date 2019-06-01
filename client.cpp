@@ -71,10 +71,7 @@ static std::atomic_uint64_t cmd_seq_counter{0};
 static std::vector<search_entry> last_search_result{};
 
 static std::mutex awaitng_packets_mutex{};
-static std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
-
-// Filesystem access mutex.
-static std::mutex fs_mutex{};
+static std::unordered_map<uint64, std::unique_ptr<work_queue<packet>>> awaiting_packets{};
 
 // If anything is written to this fd, this means the thread should immediently
 // abort its work. Used not to block the threads on recv (along with poll).
@@ -114,14 +111,14 @@ struct basic_packet_handler
 protected:
     // This fucntion is done every time packet is received. If it returns true,
     // then no more packets will be consumed.
-    virtual bool on_packet_receive(send_packet const& packet) { return false; }
+    virtual bool on_packet_receive(packet const&) { return false; }
 
     // This is called to obtain the result, once after package receive loop
     // finishes.
     virtual T get_result() { return T{}; }
 
 public:
-    work_queue<send_packet>* my_work_queue;
+    work_queue<packet>* my_work_queue;
     uint64 const cmd_seq;
     bool aborted;
 
@@ -135,15 +132,15 @@ public:
         assert(awaiting_packets.count(cmd_seq) == 0);
         awaiting_packets.emplace(
             cmd_seq,
-            std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() +
+            std::make_unique<work_queue<packet>>(chrono::system_clock::now() +
                                                       chrono::seconds{*co.timeout}));
 
         my_work_queue = awaiting_packets[cmd_seq].get();
     }
 
-    T receive_packets(uint64 cmd_seq) {
+    T receive_packets() {
         for (;;) {
-            std::optional<send_packet> c = my_work_queue->consume();
+            std::optional<packet> c = my_work_queue->consume();
             if (!c.has_value())
             {
                 logger.trace("No more [%lu] packets", cmd_seq);
@@ -169,7 +166,7 @@ struct hello_packet_handler : basic_packet_handler<std::vector<available_server>
 protected:
     std::vector<available_server> servers;
 
-    bool on_packet_receive(send_packet const& packet) override {
+    bool on_packet_receive(packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::cmplx);
 
         if (!packet.cmd.check_header("GOOD_DAY")) {
@@ -219,7 +216,7 @@ struct list_packet_handler : basic_packet_handler<std::vector<search_entry>>
 protected:
     std::vector<search_entry> search_result;
 
-    bool on_packet_receive(send_packet const& packet) override {
+    bool on_packet_receive(packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::simpl);
 
         if (!packet.cmd.check_header("MY_LIST")) {
@@ -270,7 +267,7 @@ protected:
     // Non-null if one server has agree to take the file.
     std::optional<accept_msg_content> result = {};
 
-    bool on_packet_receive(send_packet const& packet) override {
+    bool on_packet_receive(packet const& packet) override {
         if (!packet.cmd.check_header("CAN_ADD") &&
             !packet.cmd.check_header("NO_WAY")) {
             logger.pckg_error(packet.addr, "Unexpected header");
@@ -308,7 +305,7 @@ protected:
     // Non-null if one server has agree to take the file.
     std::optional<accept_msg_content> result = {};
 
-    bool on_packet_receive(send_packet const& packet) override {
+    bool on_packet_receive(packet const& packet) override {
         if (!packet.cmd.check_header("CONNECT_ME")) {
             logger.pckg_error(packet.addr, "Unexpected header");
             return false;
@@ -337,12 +334,12 @@ void packets_thread(int sock)
     pfd[0].fd = signal_fd;
     pfd[0].events = POLLIN | POLLERR | POLLHUP;
     pfd[1].fd = sock;
-    pfd[1].events = POLLIN | POLLERR | POLLHUP;;
+    pfd[1].events = POLLIN | POLLERR | POLLHUP;
 
     for (;;)
     {
-        send_packet response{};
-        int ret = poll(pfd, 2, -1);
+        packet response{};
+        poll(pfd, 2, -1);
 
         if (pfd[0].revents & POLLIN)
         {
@@ -372,11 +369,11 @@ void try_upload_file(int sock,
     uint64 fetch_packet_id = cmd_seq_counter++;
     hello_packet_handler ph{fetch_packet_id};
 
-    send_packet packet = send_packet::make_simpl("HELLO", fetch_packet_id, 0, 0, remote_address);
-    logger.trace_packet("Sending to", packet, cmd_type::simpl);
-    send_dgram(sock, packet);
+    packet hello_packet = packet::make_simpl("HELLO", fetch_packet_id, nullptr, 0, remote_address);
+    logger.trace_packet("Sending to", hello_packet, cmd_type::simpl);
+    send_dgram(sock, hello_packet);
 
-    std::vector<available_server> servers = ph.receive_packets(fetch_packet_id);
+    std::vector<available_server> servers = ph.receive_packets();
     if (ph.aborted) {
         logger.trace("packet handling aborted!");
         return;
@@ -398,16 +395,16 @@ void try_upload_file(int sock,
     for(auto&& serv : servers)
     {
         uint64 packet_id = cmd_seq_counter++;
-        send_packet send = send_packet::make_cmplx("ADD", packet_id, file_size,
+        packet send = packet::make_cmplx("ADD", packet_id, file_size,
                                                    (uint8 const*)filename.c_str(),
                                                    filename.size(), serv.uaddr);
 
-        add_packet_handler ph{packet_id};
+        add_packet_handler ph_add{packet_id};
         logger.trace_packet("Sending to", send, cmd_type::cmplx);
         send_dgram(sock, send);
 
-        server_agreement = ph.receive_packets(packet_id);
-        if (ph.aborted) {
+        server_agreement = ph_add.receive_packets();
+        if (ph_add.aborted) {
             logger.trace("packet handling aborted!");
             return;
         }
@@ -425,14 +422,14 @@ void try_upload_file(int sock,
         std::string port_str = std::to_string(server_agreement->awaiting_port_num);
 
         logger.trace("Starting TCP conn at port %s", port_str.c_str());
-        int sock = connect_to_stream(addr_str.c_str(), port_str.c_str(), chrono::seconds{*co.timeout});
+        int stream_sock = connect_to_stream(addr_str.c_str(), port_str.c_str(), chrono::seconds{*co.timeout});
 
-        auto[success, reason] = (sock < 0
+        auto[success, reason] = (stream_sock < 0
                                  ? std::make_tuple(false, std::string{"Cound not connect to the server"})
-                                 : stream_file(sock, file_path));
+                                 : stream_file(stream_sock, file_path));
 
-        if (sock > 0)
-            safe_close(sock);
+        if (stream_sock > 0)
+            safe_close(stream_sock);
 
         if (success)
         {
@@ -460,7 +457,7 @@ void try_receive_file(int sock,
 {
     uint64 packet_id = cmd_seq_counter++;
     get_packet_handler ph{packet_id};
-    send_packet send = send_packet::make_simpl(
+    packet send = packet::make_simpl(
         "GET",
         packet_id,
         (uint8 const*)found_server.filename.c_str(),
@@ -471,7 +468,7 @@ void try_receive_file(int sock,
 
     send_dgram(sock, send);
 
-    std::optional<accept_msg_content> server_agreement = ph.receive_packets(packet_id);
+    std::optional<accept_msg_content> server_agreement = ph.receive_packets();
     if (ph.aborted) {
         logger.trace("packet handling aborted!");
         return;
@@ -510,7 +507,7 @@ void try_receive_file(int sock,
         return;
     }
 
-    auto[success, reason] = recv_file_stream(stream_sock, out, std::nullopt, fs_mutex, signal_fd);
+    auto[success, reason] = recv_file_stream(stream_sock, out, std::nullopt, signal_fd);
     safe_close(stream_sock);
     if (!success)
     {
@@ -559,9 +556,8 @@ client_options parse_args(int argc, char** argv)
                 retval.timeout = timeout;
             } break;
 
-            default: {
+            default:
                 logger.fatal("Invalid arguments");
-            } break;
         }
     }
 
@@ -688,12 +684,12 @@ main(int argc, char** argv)
             uint64 packet_id = cmd_seq_counter++;
             hello_packet_handler ph{packet_id};
 
-            send_packet send = send_packet::make_simpl("HELLO", packet_id, 0, 0, remote_address);
+            packet send = packet::make_simpl("HELLO", packet_id, 0, 0, remote_address);
             logger.trace_packet("Sending to", send, cmd_type::simpl);
             send_dgram(sock, send);
 
             std::vector<available_server> available_servers{};
-            available_servers = ph.receive_packets(packet_id);
+            available_servers = ph.receive_packets();
             if (ph.aborted)
                 continue;
 
@@ -710,14 +706,14 @@ main(int argc, char** argv)
             uint64 packet_id = cmd_seq_counter++;
             list_packet_handler ph{packet_id};
 
-            send_packet send = send_packet::make_simpl(
+            packet send = packet::make_simpl(
                 "LIST", packet_id, (uint8 const*)param.data(), param.size(), remote_address);
             logger.trace_packet("Sending to", send, cmd_type::simpl);
             send_dgram(sock, send);
 
             // This will block the main thread.
             last_search_result.clear();
-            last_search_result = ph.receive_packets(packet_id);
+            last_search_result = ph.receive_packets();
 #if 0
             if (ph.aborted) {
                 logger.trace("packet handling aborted!");
@@ -739,7 +735,7 @@ main(int argc, char** argv)
             }
 
             uint64 packet_id = cmd_seq_counter++;
-            send_packet send = send_packet::make_simpl(
+            packet send = packet::make_simpl(
                 "DEL", packet_id, (uint8 const*)param.data(), param.size(), remote_address);
             logger.trace_packet("Sending to", send, cmd_type::simpl);
             send_dgram(sock, send);

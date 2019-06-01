@@ -161,13 +161,12 @@ std::pair<bool, std::string>
 recv_file_stream(int sock,
                  fs::path out_file_path,
                  std::optional<size_t> expected_size,
-                 std::mutex& fs_mutex,
                  int signal_fd)
 {
     std::vector<uint8> file_content{};
     file_content.reserve(4096);
     uint8 buffer[send_block_size];
-    ssize_t len;
+    ssize_t len = 0;
     size_t len_total = 0;
 
     FILE* output_file_hndl;
@@ -215,9 +214,9 @@ recv_file_stream(int sock,
     return {true, ""};
 }
 
-void send_dgram(int sock, send_packet const& packet)
+void send_dgram(int sock, packet const& packet)
 {
-    sendto(sock, packet.cmd.bytes, packet.msg_len, 0, (sockaddr*)&packet.addr, sizeof(packet.addr));
+    sendto(sock, packet.cmd.bytes, packet.msg_len, 0, (sockaddr const*)(&packet.addr), sizeof(packet.addr));
     if (packet.msg_len != packet.msg_len)
     {
         if (errno == EAGAIN)
@@ -232,11 +231,11 @@ void send_dgram(int sock, send_packet const& packet)
                      std::to_string(ntohs(packet.addr.sin_port)).c_str());
 }
 
-send_packet recv_dgram(int sock)
+packet recv_dgram(int sock)
 {
-    send_packet retval{};
-    int rcv_len = recvfrom(sock, retval.cmd.bytes, sizeof(retval.cmd.bytes), 0,
-                           (sockaddr*)&retval.addr, &retval.addr_len);
+    packet retval{};
+    ssize_t rcv_len = recvfrom(sock, retval.cmd.bytes, sizeof(retval.cmd.bytes), 0,
+                               (sockaddr*)&retval.addr, &retval.addr_len);
     retval.msg_len = rcv_len;
 
     if (rcv_len < 0)
@@ -255,14 +254,13 @@ std::pair<bool, std::string> stream_file(int sock, fs::path file_path)
     uint8 buffer[send_block_size];
     FILE* f = fopen(file_path.string().c_str(), "r");
     size_t read;
-    bool send_error = false;
 
     while ((read = fread(buffer, 1, send_block_size, f)) > 0)
     {
         ssize_t sent = send_stream(sock, buffer, read);
         if (sent == -1)
         {
-            if (errno = EAGAIN)
+            if (errno == EAGAIN)
                 return {false, "Tiemout while sending the file"};
             else
                 return {false, "Error while sending the file"};
