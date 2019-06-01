@@ -50,65 +50,53 @@ static server_options so;
 server_options parse_args(int argc, char const** argv)
 {
     server_options retval{};
-    for (int i = 1; i < argc; ++i)
-    {
+    for (int i = 1; i < argc; ++i) {
         uint32 arg_hashed = strhash(argv[i]);
 
-        if (i == argc - 1) {
-            // As every switch arg takes one followup, we know that the
-            // arguments are ill-formed. TODO?
-            break;
-        }
+        if (i == argc - 1)
+            logger.fatal("Invalid arguments");
 
         // The constexpr trick will speed up string lookups, as we don't have to
         // invoke string compare.
-        switch (arg_hashed)
-        {
-            case strhash("-g"): // MCAST_ADDR
-            {
+        switch (arg_hashed) {
+            case strhash("-g"): { // MCAST_ADDR
                 ++i;
                 retval.mcast_addr = std::string{argv[i]};
             } break;
 
-            case strhash("-p"): // CMD_PORT
-            {
+            case strhash("-p"): { // CMD_PORT
                 ++i;
-                int32 port = std::stoi(argv[i]); // TODO: Validate value?
+                int32 port = std::atoi(argv[i]);
                 retval.cmd_port = port;
             } break;
 
-            case strhash("-b"): // MAX_SPACE
-            {
+            case strhash("-b"): { // MAX_SPACE
                 ++i;
-                int64 space_limit = std::stoi(argv[i]);  // TODO: Validate value?
+                int64 space_limit = std::atoll(argv[i]);
                 retval.max_space = space_limit;
             } break;
 
-            case strhash("-f"): // SHRD_FLDR
-            {
+            case strhash("-f"): { // SHRD_FLDR
                 ++i;
                 retval.shrd_fldr = std::string{argv[i]};
             } break;
 
-            case strhash("-t"): // TIMEOUT
-            {
-                // TODO: MAX allowed is 300!
+            case strhash("-t"): { // TIMEOUT
                 ++i;
-                int32 timeout = std::stoi(argv[i]); // TODO: Validate value?
+                int32 timeout = std::min(std::atoi(argv[i]), 300);
                 retval.timeout = timeout;
             } break;
 
-            default:
-                break;
-                // TODO: How to treat unscpecified arguments?
+            default: {
+                logger.fatal("Invalid arguments");
+            } break;
         }
     }
 
     // If any of the fields is null, a required field was not set, so we exit.
     if (!retval.mcast_addr || !retval.shrd_fldr || !retval.max_space || !retval.cmd_port || !retval.timeout)
     {
-        logger.trace("Nope");
-        exit(1);
+        logger.fatal("Missing required arguments");
     }
 
     return retval;
@@ -152,9 +140,8 @@ std::string make_filenames_list(std::string const& pattern)
 {
     std::lock_guard<std::mutex> m{fs_mutex};
 
-    // TODO: Decide what happend when pattern is like: "A\0B"
     std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
-    for (auto&& entry : fs::directory_iterator(so.shrd_fldr.value()))
+    for (auto&& entry : fs::directory_iterator(* so.shrd_fldr))
         if (entry.is_regular_file())
         {
             std::string filename = entry.path().filename();
@@ -390,8 +377,8 @@ static void handle_request_hello(int sock, send_packet const& packet, ssize_t ms
         "GOOD_DAY",
         packet.cmd.get_cmd_seq(),
         current_space < 0 ? 0 : current_space, // Handle the case when no space.
-        (uint8 const*)(so.mcast_addr.value().c_str()),
-        strlen(so.mcast_addr.value().c_str()));
+        (uint8 const*)(so.mcast_addr->c_str()),
+        so.mcast_addr->size());
 
     logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
     send_dgram(sock, packet.from_addr, response.bytes, size);
@@ -499,11 +486,8 @@ static void handle_request_get(int sock, send_packet const& packet, ssize_t msg_
     }
     else
     {
-        // TODO: HOW DO I REPORT THIS ERROR?
-        logger.trace("I dont have file: %s\n", file_path.filename().c_str());
+        logger.pckg_error(packet.from_addr, "File does not exists");
     }
-
-     // TODO: Watch closely for strlen.
 }
 
 static void handle_request_add(int sock, send_packet const& packet, ssize_t msg_len)
@@ -605,10 +589,10 @@ int main(int argc, char const** argv)
 
     // Create a folder if it does not exists already.
     // TODO: Check the output and fail miserably on error.
-    fs::create_directories(so.shrd_fldr.value().c_str());
-    current_folder = fs::path{so.shrd_fldr.value()};
+    fs::create_directories(so.shrd_fldr->c_str());
+    current_folder = fs::path{* so.shrd_fldr};
 
-    index_files(so.max_space.value());
+    index_files(* so.max_space);
 
     // SERVER STUFF: (TODO: Move away!)
     // argumenty wywołania programu
@@ -625,8 +609,8 @@ int main(int argc, char const** argv)
     ssize_t rcv_len;
     int i;
 
-    multicast_dotted_address = so.mcast_addr.value().c_str();
-    local_port = (in_port_t)(so.cmd_port.value());
+    multicast_dotted_address = so.mcast_addr->c_str();
+    local_port = (in_port_t)(* so.cmd_port);
 
     // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -637,7 +621,7 @@ int main(int argc, char const** argv)
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(multicast_dotted_address, &ip_mreq.imr_multiaddr) == 0)
         logger.syserr("inet_aton");
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&ip_mreq, sizeof(ip_mreq)) < 0)
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)(&ip_mreq), sizeof(ip_mreq)) < 0)
         logger.syserr("setsockopt");
 
     // podpięcie się pod lokalny adres i port

@@ -547,41 +547,37 @@ client_options parse_args(int argc, char** argv)
     {
         uint32 arg_hashed = strhash(argv[i]);
 
-        if (i == argc - 1) {
-            // As every switch arg takes one followup, we know that the
-            // arguments are ill-formed. TODO?
-            break;
-        }
+        if (i == argc - 1)
+            logger.fatal("Invalid arguments");
 
         // The constexpr trick will speed up string lookups, as we don't have to
         // invoke string compare.
         switch (arg_hashed)
         {
-            case strhash("-g"): // MCAST_ADDR
-            {
+            case strhash("-g"): { // MCAST_ADDR
                 ++i;
                 retval.mcast_addr = std::string{argv[i]};
             } break;
 
-            case strhash("-p"): // CMD_PORT
-            {
+            case strhash("-p"): { // CMD_PORT
                 ++i;
-                int32 port = std::stoi(argv[i]); // TODO: Validate value?
+                int32 port = std::stoi(argv[i]);
                 retval.cmd_port = port;
             } break;
 
-            case strhash("-o"): // OUT_FLDR
-            {
+            case strhash("-o"): { // OUT_FLDR
                 ++i;
                 retval.out_fldr = std::string{argv[i]};
             } break;
 
-            case strhash("-t"): // TIMEOUT
-            {
-                // TODO: MAX allowed is 300!
+            case strhash("-t"): { // TIMEOUT
                 ++i;
-                int32 timeout = std::stoi(argv[i]); // TODO: Validate value?
+                int32 timeout = std::min(std::stoi(argv[i]), 300);
                 retval.timeout = timeout;
+            } break;
+
+            default: {
+                logger.fatal("Invalid arguments");
             } break;
         }
     }
@@ -589,8 +585,7 @@ client_options parse_args(int argc, char** argv)
     // If any of the fields is null, a required field was not set, so we exit.
     if (!retval.mcast_addr || !retval.out_fldr || !retval.cmd_port || !retval.timeout)
     {
-        logger.trace("Nope");
-        exit(1);
+        logger.fatal("Missing required arguments");
     }
 
     return retval;
