@@ -162,33 +162,6 @@ std::string make_filenames_list(std::string const& pattern)
     return filenames;
 }
 
-// If file exists this will load its contents into the vector and return (true,
-// contents) pair, otherwise (false, _) is returned, where _ could be anything.
-std::pair<bool, std::vector<uint8>>
-load_file_if_exists(fs::path file_path)
-{
-    std::vector<uint8> contents{};
-
-    std::lock_guard<std::mutex> m{fs_mutex};
-    if (fs::exists(file_path))
-    {
-        constexpr static size_t buffer_size = 32768;
-        std::ifstream file{file_path};
-        char buffer[buffer_size];
-
-        assert(file.is_open()); // TODO: Dont assert!
-        while (!(file.eof() || file.fail())) {
-            file.read(buffer, buffer_size);
-            contents.reserve(contents.size() + file.gcount());
-            contents.insert(contents.end(), buffer, buffer + file.gcount());
-        }
-
-        return {true, contents};
-    }
-
-    return {false, contents};
-}
-
 // This assumes that the filename is valid.
 bool try_alloc_file(fs::path file_path, ssize_t size)
 {

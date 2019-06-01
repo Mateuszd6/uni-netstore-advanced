@@ -1,5 +1,5 @@
-#ifndef CONNECTION_H
-#define CONNECTION_H
+#ifndef CONNECTION_HPP
+#define CONNECTION_HPP
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -247,7 +247,34 @@ send_packet recv_dgram(int sock)
     return retval;
 }
 
+// TODO: FS MUTEX!
+// If file exists this will load its content into the vector and return (true,
+// content) pair, otherwise (false, _) is returned, where _ could be anything.
+std::pair<bool, std::vector<uint8>>
+load_file_if_exists(fs::path file_path)
+{
+    std::vector<uint8> content{};
+    if (fs::exists(file_path))
+    {
+        FILE* f = fopen(file_path.string().c_str(), "r");
 
-// TODO: recv_dgram
+        // Determine file size
+        fseek(f, 0, SEEK_END);
+        size_t size = ftell(f);
+        char* buffer = new char[size];
 
-#endif // CONNECTION_H
+        rewind(f);
+        fread(buffer, sizeof(char), size, f);
+        content.resize(size);
+        for (int i = 0; i < size; ++i)
+            content[i] = buffer[i];
+
+        delete[] buffer;
+
+        return {true, content};
+    }
+
+    return {false, content};
+}
+
+#endif // CONNECTION_HPP

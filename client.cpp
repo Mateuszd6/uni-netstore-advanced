@@ -108,32 +108,6 @@ std::string get_input_line()
     return retval;
 }
 
-// TODO: This is a copypaste of the server function.
-// If file exists this will load its content into the vector and return (true,
-// content) pair, otherwise (false, _) is returned, where _ could be anything.
-std::pair<bool, std::vector<uint8>>
-load_file_if_exists(fs::path file_path)
-{
-    std::vector<uint8> content{};
-    if (fs::exists(file_path))
-    {
-        constexpr static size_t buffer_size = 32768;
-        std::ifstream file{file_path};
-        char buffer[buffer_size];
-
-        assert(file.is_open());
-        while (!(file.eof() || file.fail())) {
-            file.read(buffer, buffer_size);
-            content.reserve(content.size() + file.gcount());
-            content.insert(content.end(), buffer, buffer + file.gcount());
-        }
-
-        return {true, content};
-    }
-
-    return {false, content};
-}
-
 std::pair<bool, std::string>
 send_file_over_tcp(std::string const& addr,
                    std::string const& port,
