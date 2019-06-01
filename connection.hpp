@@ -168,7 +168,7 @@ recv_file_stream(int sock,
     file_content.reserve(4096);
     uint8 buffer[send_block_size];
     ssize_t len;
-    size_t len_total;
+    size_t len_total = 0;
 
     FILE* output_file_hndl;
     if (!(output_file_hndl = fopen(out_file_path.c_str(), "w+")))
