@@ -23,13 +23,13 @@ std::optional<in_addr> string_to_addr(std::string const& str)
     return retval;
 }
 
+// Since inet_ntoa returns a pointer to the buffer, which content is replaced
+// with another call, we must sync the inet_ntoa calls. After the call we copy
+// the result and return as std::string.
+static std::mutex ntoa_mutex{};
+
 std::string addr_to_string(in_addr addr)
 {
-    // Since inet_ntoa returns a pointer to the buffer, which content is
-    // replaced with another call, we must sync the inte_ntoa calls. After the
-    // call we copy the result and return as std::string.
-    static std::mutex ntoa_mutex{};
-
     std::lock_guard<std::mutex> m{ntoa_mutex};
     std::string retval = inet_ntoa(addr);
     return retval;
@@ -154,9 +154,7 @@ ssize_t recv_stream(int fd, uint8* buffer, size_t count) {
 void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
 {
     if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
-    {
-        logger.syserr("sendto");
-    }
+        logger.trace("failed to send data");
 }
 
 // TODO: recv_dgram

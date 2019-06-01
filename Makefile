@@ -13,7 +13,7 @@ WARN_FLAGS=-Wall -Wextra -Wshadow
 # students has completly broken sanitizer dependencies.
 SANITIZERS=-fsanitize=undefined
 
-COMMON_OBJ=cmd.o common.o
+COMMON_OBJ=cmd.o common.o logger.o
 CLIENT_OBJ=client.o
 SERVER_OBJ=server.o
 
