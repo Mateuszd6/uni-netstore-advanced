@@ -7,7 +7,7 @@ COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -fno-omit-frame-pointer
 RELEASE_FLAGS=-O3 -DNDEBUG
 INCLUDE_FLAGS=-I.
-LINK_FLAGS=-lstdc++fs -lpthread
+LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
 WARN_FLAGS=-Wall -Wextra -Wshadow
 
 # students has completly broken sanitizer dependencies.

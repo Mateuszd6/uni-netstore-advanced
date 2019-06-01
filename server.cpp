@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
-#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -121,10 +120,10 @@ void index_files(int64 max_space)
     current_space = max_space;
     int64 total_size = 0;
     for (auto&& entry : fs::directory_iterator(current_folder))
-        if (entry.is_regular_file())
+        if (fs::is_regular_file(entry.path()))
         {
-            logger.trace("%s -> %ld", entry.path().c_str(), entry.file_size());
-            total_size += entry.file_size();
+            logger.trace("%s -> %ld", entry.path().c_str(), fs::file_size(entry.path()));
+            total_size += fs::file_size(entry.path());
         }
 
     current_space -= total_size;
@@ -141,9 +140,9 @@ std::string make_filenames_list(std::string const& pattern)
 
     std::string filenames{}; // TODO: Figure out how many bytes its good to reserve
     for (auto&& entry : fs::directory_iterator(* so.shrd_fldr))
-        if (entry.is_regular_file())
+        if (fs::is_regular_file(entry.path()))
         {
-            std::string filename = entry.path().filename();
+            std::string filename = entry.path().filename().string();
             if (pattern.size() > 0 &&
                 std::search(filename.begin(), filename.end(),
                             pattern.begin(), pattern.end()) == filename.end())
@@ -152,7 +151,7 @@ std::string make_filenames_list(std::string const& pattern)
                 continue;
             }
 
-            logger.trace("%s -> %ld", entry.path().c_str(), entry.file_size());
+            logger.trace("%s -> %ld", entry.path().c_str(), fs::file_size(entry.path()));
 
             // If there were some entries before, split them with \n.
             if (filenames.size() > 0)
@@ -391,7 +390,7 @@ static void handle_request_get(int sock, send_packet const& packet)
         return;
     }
 
-    fs::path file_path{current_folder / filename_sv};
+    fs::path file_path{current_folder / std::string{filename_sv}};
     auto[exists, content] = load_file_if_exists(file_path);
     if (exists)
     {
@@ -439,7 +438,9 @@ static void handle_request_add(int sock, send_packet const& packet)
 
     logger.trace("Adding a file: %s", filename_sv.data());
 
-    fs::path file_path{current_folder / filename_sv};
+    fs::path file_path{current_folder};
+    file_path /= std::string{filename_sv};
+
     if (try_alloc_file(file_path, (ssize_t)packet.cmd.cmplx.get_param()))
     {
         auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
@@ -495,7 +496,8 @@ static void handle_request_del(int sock, send_packet const& packet)
 
     logger.trace("Removing file %s", packet.cmd.simpl.data);
 
-    fs::path file_path = current_folder / filename_sv;
+    fs::path file_path = current_folder;
+    file_path /= std::string{filename_sv};
     try_delete_file(file_path);
 }
 

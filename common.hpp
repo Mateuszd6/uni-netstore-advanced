@@ -3,10 +3,10 @@
 
 // Common namespace aliases.
 #include <chrono>
+#include <boost/filesystem.hpp>
 namespace chrono = std::chrono;
 using namespace std::chrono_literals;
-#include <filesystem>
-namespace fs = std::filesystem;
+namespace fs = boost::filesystem;
 
 using int8 = int8_t;
 using uint8 = uint8_t;

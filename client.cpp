@@ -23,11 +23,11 @@
 #include <string>
 #include <thread>
 #include <chrono>
-#include <filesystem>
+#include <boost/filesystem.hpp>
 #include <mutex>
 #include <unordered_map>
 #include <future>
-namespace fs = std::filesystem;
+namespace fs = boost::filesystem;
 
 #include "common.hpp"
 #include "work_queue.hpp"
@@ -816,8 +816,8 @@ main(int argc, char** argv)
                 continue;
             }
 
-            fs::path upload_file_path{param};
-            std::string filename{upload_file_path.filename()};
+            fs::path upload_file_path{std::string(param)};
+            std::string filename{upload_file_path.filename().string()};
 
             // We load the whole file into memory to avoid races.
             auto[exists, data] = load_file_if_exists(upload_file_path);
