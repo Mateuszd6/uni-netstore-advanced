@@ -44,6 +44,8 @@ static ssize_t current_space = 0;
 // global server options.
 static server_options so;
 
+static int signal_fd;
+
 // TODO: This should throw invalid value and report error by usage msg.
 server_options parse_args(int argc, char const** argv)
 {
@@ -229,7 +231,7 @@ bool try_delete_file(fs::path const& file_path)
 
 bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size)
 {
-    auto[succeess, reason] = recv_file_stream(msg_sock, file_path, expected_size, fs_mutex);
+    auto[succeess, reason] = recv_file_stream(msg_sock, file_path, expected_size, fs_mutex, signal_fd);
     if (!succeess)
     {
         logger.trace("Error downloading the file: %s", reason.c_str());
@@ -566,14 +568,15 @@ int main(int argc, char const** argv)
     assert(err == 0);
 
     // Create the signalfd
-    int sigfd = signalfd(-1, &sigset, 0);
-    assert(sigfd != -1);
+    signal_fd = signalfd(-1, &sigset, 0);
+    if (signalfd < 0)
+        logger.syserr("signalfd");
 
     struct pollfd pfd[2];
-    pfd[0].fd = sigfd;
+    pfd[0].fd = signal_fd;
     pfd[0].events = POLLIN | POLLERR | POLLHUP;
     pfd[1].fd = sock;
-    pfd[1].events = POLLIN | POLLERR | POLLHUP;;
+    pfd[1].events = POLLIN | POLLERR | POLLHUP;
 
     // czytanie tego, co odebrano
     for (;;)

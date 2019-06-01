@@ -76,6 +76,10 @@ static std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awai
 // Filesystem access mutex.
 static std::mutex fs_mutex{};
 
+// If anything is written to this fd, this means the thread should immediently
+// abort its work. Used not to block the threads on recv (along with poll).
+static int signal_fd;
+
 // We could use iostreams here, but for consistency, lets not use them.
 std::string get_input_line()
 {
@@ -105,12 +109,12 @@ std::string get_input_line()
 }
 
 // TODO: This is a copypaste of the server function.
-// If file exists this will load its contents into the vector and return (true,
-// contents) pair, otherwise (false, _) is returned, where _ could be anything.
+// If file exists this will load its content into the vector and return (true,
+// content) pair, otherwise (false, _) is returned, where _ could be anything.
 std::pair<bool, std::vector<uint8>>
 load_file_if_exists(fs::path file_path)
 {
-    std::vector<uint8> contents{};
+    std::vector<uint8> content{};
     if (fs::exists(file_path))
     {
         constexpr static size_t buffer_size = 4096;
@@ -120,14 +124,14 @@ load_file_if_exists(fs::path file_path)
         assert(file.is_open());
         while (!(file.eof() || file.fail())) {
             file.read(buffer, buffer_size);
-            contents.reserve(contents.size() + file.gcount());
-            contents.insert(contents.end(), buffer, buffer + file.gcount());
+            content.reserve(content.size() + file.gcount());
+            content.insert(content.end(), buffer, buffer + file.gcount());
         }
 
-        return {true, contents};
+        return {true, content};
     }
 
-    return {false, contents};
+    return {false, content};
 }
 
 std::pair<bool, std::string>
@@ -136,17 +140,20 @@ send_file_over_tcp(std::string const& addr,
                    std::vector<uint8> data)
 {
     logger.trace("Sending %lu bytes to %s:%s", data.size(), addr.c_str(), port.c_str());
-
     int sock = connect_to_stream(addr.c_str(), port.c_str(), chrono::seconds{*co.timeout});
     if (sock < 0)
-    {
         return {false, "Cound not connect to the server"};
-    }
 
-    if (send_stream(sock, data.data(), data.size()) != data.size())
+    ssize_t send_len;
+    if ((send_len = send_stream(sock, data.data(), data.size())) != data.size())
     {
         safe_close(sock);
-        return {false, "Error sending the file"};
+        if (send_len == -1 && errno == EPIPE)
+            return {false, "Socket closed by server"};
+        else if (send_len == -1 && errno == EAGAIN)
+            return {false, "Timeout"};
+        else
+            return {false, "Error sending the file"};
     }
 
     logger.trace("Sending successfull");
@@ -335,10 +342,10 @@ protected:
     }
 };
 
-void packets_thread(int sock, int interfd)
+void packets_thread(int sock)
 {
     struct pollfd pfd[2];
-    pfd[0].fd = interfd;
+    pfd[0].fd = signal_fd;
     pfd[0].events = POLLIN | POLLERR | POLLHUP;
     pfd[1].fd = sock;
     pfd[1].events = POLLIN | POLLERR | POLLHUP;;
@@ -523,7 +530,7 @@ void try_receive_file(int sock,
         return;
     }
 
-    auto[success, reason] = recv_file_stream(stream_sock, out, std::nullopt, fs_mutex);
+    auto[success, reason] = recv_file_stream(stream_sock, out, std::nullopt, fs_mutex, signal_fd);
     safe_close(stream_sock);
     if (!success)
     {
@@ -647,9 +654,10 @@ main(int argc, char** argv)
     int fields[2];
     if (pipe (fields) < 0)
         logger.syserr("pipe");
+    signal_fd = fields[0];
 
     std::vector<std::thread> workers{};
-    std::thread packet_handler{packets_thread, sock, fields[0]};
+    std::thread packet_handler{packets_thread, sock};
 
     for (;;)
     {
@@ -674,9 +682,11 @@ main(int argc, char** argv)
 
         if (command == "exit")
         {
-            // Writing to pipe, means to packet hndler that he must die now.
+            // Writing to this pipe will deliver the shutdown msg to all threads
+            // waiting on the recv_file and to packet handler.
             if (write(fields[1], "0", 1) < 0)
                 logger.syserr("write");
+
             packet_handler.join();
             logger.trace("Joined packet handler!");
 

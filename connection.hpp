@@ -144,7 +144,7 @@ ssize_t send_stream(int fd, uint8* buffer, size_t count) {
     for (size_t i = 0; i < count;) {
         ssize_t chunk_len = i + send_block_size > count ? count - i : send_block_size;
         ssize_t send_data = 0;
-        send_data = send(fd, buffer + i, chunk_len, 0);
+        send_data = send(fd, buffer + i, chunk_len, MSG_NOSIGNAL); // Dont receive SIGPIPE
         if (send_data == -1) {
             return -1;
         }
@@ -160,17 +160,37 @@ std::pair<bool, std::string>
 recv_file_stream(int sock,
                  fs::path out_file_path,
                  std::optional<size_t> expected_size,
-                 std::mutex& fs_mutex)
+                 std::mutex& fs_mutex,
+                 int signal_fd)
 {
     std::vector<uint8> file_content;
     uint8 buffer[send_block_size];
     ssize_t len;
 
-    // If expected size is specified, dont load more bytes than we need to
-    // report an invalid size error.
-    while ((len = recv(sock, buffer, send_block_size, 0)) > 0 &&
-           (!expected_size || len <= expected_size))
+    struct pollfd pfd[2];
+    pfd[0].fd = signal_fd;
+    pfd[0].events = POLLIN | POLLERR | POLLHUP;
+    pfd[1].fd = sock;
+    pfd[1].events = POLLIN | POLLERR | POLLHUP;
+
+    for (;;)
     {
+        logger.trace("Doing poll");
+        poll(pfd, 2, -1);
+        if (pfd[0].revents & POLLIN)
+        {
+            logger.trace("Thread interrupted.");
+            return {false, "Interrupted"};
+        }
+
+        if (pfd[1].revents & POLLIN)
+        {
+            len = recv(sock, buffer, send_block_size, 0);
+        }
+
+        if (len <= 0 || (expected_size && len > expected_size))
+            break;
+
         logger.trace("Got %lu bytes", len);
         std::copy(buffer, buffer + len, std::back_inserter(file_content));
     }
