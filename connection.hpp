@@ -137,7 +137,7 @@ int accept_client_stream(int sock, chrono::seconds timeout)
     return msg_sock;
 }
 
-constexpr static size_t send_block_size = 32768;
+constexpr static size_t send_block_size = 62000;
 
 // Sends count bytes over tcp socket. Returns -1 on error.
 ssize_t send_stream(int fd, uint8* buffer, size_t count) {
@@ -207,6 +207,8 @@ recv_file_stream(int sock,
             return {false, "Error while reading the socket"};
     }
 
+    if (expected_size)
+        logger.trace("Size: current: %lu, expected: %lu\n", len_total, *expected_size);
     if (expected_size && len_total != *expected_size)
         return {false, "File size does not match expectation"};
 
