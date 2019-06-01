@@ -117,7 +117,7 @@ load_file_if_exists(fs::path file_path)
     std::vector<uint8> content{};
     if (fs::exists(file_path))
     {
-        constexpr static size_t buffer_size = 4096;
+        constexpr static size_t buffer_size = 32768;
         std::ifstream file{file_path};
         char buffer[buffer_size];
 
