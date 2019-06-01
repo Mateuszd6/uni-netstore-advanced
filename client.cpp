@@ -225,19 +225,37 @@ protected:
     bool on_packet_receive(send_packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::cmplx);
 
-        // TODO: Validate the size of a msg.
+        if (!packet.cmd.check_header("GOOD_DAY")) {
+            logger.pckg_error(packet.addr, "Unexpected header");
+            return false;
+        }
 
+        std::string_view cmd_data{
+            (char const*)packet.cmd.cmplx.get_data(),
+            packet.msg_len - command::cmplx_head_size
+        };
 
-        // TODO: Use strview because we use zeros that are not part of the message.
+        if (!packet.cmd.contains_required_fields(cmd_type::cmplx, packet.msg_len)) {
+            logger.pckg_error(packet.addr, "GOOD_DAY response too short");
+            return false;
+        }
+
+        if (!packet.cmd.contains_data(cmd_type::cmplx, packet.msg_len) ||
+            !string_to_addr(std::string{cmd_data}))
+        {
+            logger.pckg_error(packet.addr, "GOOD_DAY response must contain valid address ");
+            return false;
+        }
+
         auto mcast_addr = string_to_addr((char const*)packet.cmd.cmplx.get_data());
         if (!mcast_addr)
         {
-            logger.pckg_error(packet.from_addr, "Address returned by server is invalid");
+            logger.pckg_error(packet.addr, "Address returned by server is invalid");
         }
         else
         {
             servers.emplace_back(
-                available_server{packet.from_addr, *mcast_addr, packet.cmd.cmplx.get_param()});
+                available_server{packet.addr, *mcast_addr, packet.cmd.cmplx.get_param()});
         }
 
         return false;
@@ -257,7 +275,23 @@ protected:
     bool on_packet_receive(send_packet const& packet) override {
         logger.trace_packet("Received from", packet, cmd_type::simpl);
 
+        if (!packet.cmd.check_header("MY_LIST")) {
+            logger.pckg_error(packet.addr, "Unexpected header");
+            return false;
+        }
+
+        std::string_view cmd_data{
+            (char const*)packet.cmd.simpl.get_data(),
+            packet.msg_len - command::simpl_head_size
+        };
+
+        if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+            logger.pckg_error(packet.addr, "MY_LIST response too short");
+            return false;
+        }
+
         // TODO: Watch out for more than one \n in a row.
+        // TODO: Wathc out for empty data.
         uint8 const* str = &packet.cmd.simpl.data[0];
         while (*str)
         {
@@ -267,7 +301,7 @@ protected:
 
             search_result.emplace_back(
                 search_entry{std::string{(char const*)str, (size_t)(p - str)},
-                             packet.from_addr});
+                             packet.addr});
 
             if (*p == '\n')
                 ++p;
@@ -290,6 +324,11 @@ protected:
     std::optional<accept_msg_content> result = {};
 
     bool on_packet_receive(send_packet const& packet) override {
+        if (!packet.cmd.check_header("CAN_ADD") &&
+            !packet.cmd.check_header("NO_WAY")) {
+            logger.pckg_error(packet.addr, "Unexpected header");
+            return false;
+        }
 
         // If we've got one reposne, we dont have to wait for more.
         if (packet.cmd.check_header("CAN_ADD"))
@@ -297,7 +336,7 @@ protected:
             // TODO: SANITIZE THE PACKET!
             logger.trace_packet("Received", packet, cmd_type::cmplx);
 
-            result = accept_msg_content{packet.from_addr, packet.cmd.cmplx.get_param()};
+            result = accept_msg_content{packet.addr, packet.cmd.cmplx.get_param()};
             return true;
         }
         else if (packet.cmd.check_header("NO_WAY"))
@@ -323,14 +362,17 @@ protected:
     std::optional<accept_msg_content> result = {};
 
     bool on_packet_receive(send_packet const& packet) override {
-        // TODO: SANITIZE THE PACKET!
+        if (!packet.cmd.check_header("CONNECT_ME")) {
+            logger.pckg_error(packet.addr, "Unexpected header");
+            return false;
+        }
 
         // If we've got one reposne, we dont have to wait for more.
         if (packet.cmd.check_header("CONNECT_ME"))
         {
             logger.trace_packet("Received", packet, cmd_type::cmplx);
 
-            result = accept_msg_content{packet.from_addr, packet.cmd.cmplx.get_param()};
+            result = accept_msg_content{packet.addr, packet.cmd.cmplx.get_param()};
             return true;
         }
 
@@ -354,44 +396,23 @@ void packets_thread(int sock)
     {
         send_packet response{};
         int ret = poll(pfd, 2, -1);
-        ssize_t rcv_len;
 
         if (pfd[0].revents & POLLIN)
         {
-            logger.trace("Main thread tells me to stop. I'm gonna die now!");
+            logger.trace("Got interrupt singal");
             return;
         }
 
         if (pfd[1].revents & POLLIN)
         {
-            logger.trace("Got client");
-            rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
-                               (sockaddr*)&response.from_addr, &response.from_addr_len);
+            response = recv_dgram(sock);
         }
 
-        // If there was an error:
-        if (rcv_len < 0 && errno != EAGAIN)
-        {
-            logger.trace("Error: %s(%d)", strerror(errno), errno);
-            logger.trace("Closing!");
-            safe_close(sock);
-            exit(1); // TODO: Investigate
-        }
-        else if (rcv_len == 0) // TODO: Socket has been closed (How do we
-                               //       even get here when mutlicasting)?
-        {
-            logger.trace("NO IDEA WHAT IS HAPPENING!!!!");
-            exit(1);
-        }
-        else if (rcv_len > 0)
-        {
-            std::lock_guard<std::mutex> m{awaitng_packets_mutex};
-
-            if (awaiting_packets.count(response.cmd.get_cmd_seq()))
-                awaiting_packets[response.cmd.get_cmd_seq()]->push(response);
-            else
-                logger.pckg_error(response.from_addr, nullptr);
-        }
+        std::lock_guard<std::mutex> m{awaitng_packets_mutex};
+        if (awaiting_packets.count(response.cmd.get_cmd_seq()))
+            awaiting_packets[response.cmd.get_cmd_seq()]->push(response);
+        else
+            logger.pckg_error(response.addr, nullptr);
     }
 }
 
@@ -403,9 +424,10 @@ void try_upload_file(int sock,
     logger.trace("Fetching the list");
     uint64 fetch_packet_id = cmd_seq_counter++;
     hello_packet_handler ph{fetch_packet_id};
-    auto[request, size] = command::make_simpl("HELLO", fetch_packet_id, 0, 0);
-    logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
-    send_dgram(sock, remote_address, request.bytes, size);
+
+    send_packet packet = send_packet::make_simpl("HELLO", fetch_packet_id, 0, 0, remote_address);
+    logger.trace_packet("Sending to", packet, cmd_type::simpl);
+    send_dgram(sock, packet);
 
     std::vector<available_server> servers = ph.receive_packets(fetch_packet_id);
     if (ph.aborted) {
@@ -423,14 +445,13 @@ void try_upload_file(int sock,
     for(auto&& serv : servers)
     {
         uint64 packet_id = cmd_seq_counter++;
-        auto[request, size] = command::make_cmplx(
-            "ADD", packet_id, file_data.size(),
-            (uint8 const*)filename.c_str(),
-            filename.size());
+        send_packet send = send_packet::make_cmplx("ADD", packet_id, file_data.size(),
+                                                   (uint8 const*)filename.c_str(),
+                                                   filename.size(), serv.uaddr);
 
         add_packet_handler ph{packet_id};
-        logger.trace_packet("Sending to", send_packet{request, serv.uaddr}, cmd_type::cmplx);
-        send_dgram(sock, serv.uaddr, request.bytes, size);
+        logger.trace_packet("Sending to", send, cmd_type::cmplx);
+        send_dgram(sock, send);
 
         server_agreement = ph.receive_packets(packet_id);
         if (ph.aborted) {
@@ -479,17 +500,16 @@ void try_receive_file(int sock,
 {
     uint64 packet_id = cmd_seq_counter++;
     get_packet_handler ph{packet_id};
-    auto[request, size] = command::make_simpl(
+    send_packet send = send_packet::make_simpl(
         "GET",
         packet_id,
         (uint8 const*)found_server.filename.c_str(),
-        found_server.filename.size());
+        found_server.filename.size(),
+        found_server.server_uaddr);
 
-    logger.trace_packet("Sending to",
-                        send_packet{request, found_server.server_uaddr},
-                        cmd_type::simpl);
+    logger.trace_packet("Sending to", send, cmd_type::simpl);
 
-    send_dgram(sock, found_server.server_uaddr, request.bytes, size);
+    send_dgram(sock, send);
 
     std::optional<accept_msg_content> server_agreement = ph.receive_packets(packet_id);
     if (ph.aborted) {
@@ -708,11 +728,9 @@ main(int argc, char** argv)
             uint64 packet_id = cmd_seq_counter++;
             hello_packet_handler ph{packet_id};
 
-            auto[request, size] = command::make_simpl("HELLO", packet_id, 0, 0);
-            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
-            send_dgram(sock, remote_address, request.bytes, size);
-
-            // TODO: VALIDATE DATA!?
+            send_packet send = send_packet::make_simpl("HELLO", packet_id, 0, 0, remote_address);
+            logger.trace_packet("Sending to", send, cmd_type::simpl);
+            send_dgram(sock, send);
 
             std::vector<available_server> available_servers{};
             available_servers = ph.receive_packets(packet_id);
@@ -732,9 +750,10 @@ main(int argc, char** argv)
             uint64 packet_id = cmd_seq_counter++;
             list_packet_handler ph{packet_id};
 
-            auto[request, size] = command::make_simpl("LIST", packet_id, (uint8 const*)param.data(), param.size());
-            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
-            send_dgram(sock, remote_address, request.bytes, size);
+            send_packet send = send_packet::make_simpl(
+                "LIST", packet_id, (uint8 const*)param.data(), param.size(), remote_address);
+            logger.trace_packet("Sending to", send, cmd_type::simpl);
+            send_dgram(sock, send);
 
             // This will block the main thread.
             last_search_result.clear();
@@ -760,9 +779,10 @@ main(int argc, char** argv)
             }
 
             uint64 packet_id = cmd_seq_counter++;
-            auto[request, size] = command::make_simpl("DEL", packet_id, (uint8 const*)param.data(), param.size());
-            logger.trace_packet("Sending to", send_packet{request, remote_address}, cmd_type::simpl);
-            send_dgram(sock, remote_address, request.bytes, size);
+            send_packet send = send_packet::make_simpl(
+                "DEL", packet_id, (uint8 const*)param.data(), param.size(), remote_address);
+            logger.trace_packet("Sending to", send, cmd_type::simpl);
+            send_dgram(sock, send);
         }
         else if (command == "fetch")
         {

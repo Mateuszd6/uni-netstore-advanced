@@ -7,9 +7,10 @@ command::command()
     clear();
 }
 
+#if 0
 std::pair<command, size_t>
 command::make_simpl(char const* head, uint64 cmd_seq,
-                uint8 const* data, size_t data_len)
+                    uint8 const* data, size_t data_len)
 {
     command retval{};
 
@@ -24,7 +25,7 @@ command::make_simpl(char const* head, uint64 cmd_seq,
 
 std::pair<command, size_t>
 command::make_cmplx(char const* head, uint64 cmd_seq,
-                uint64 param_, uint8 const* data, size_t data_len)
+                    uint64 param_, uint8 const* data, size_t data_len)
 {
     command retval{};
 
@@ -37,6 +38,7 @@ command::make_cmplx(char const* head, uint64 cmd_seq,
 
     return { retval,  common_header_size + sizeof(uint64) + data_len };
 }
+#endif
 
 char const* command::get_head() const
 {

@@ -155,7 +155,8 @@ ssize_t send_stream(int fd, uint8* buffer, size_t count) {
     return count;
 }
 
-// fs_mutex is a mutex that sycns threads access to filesystem.
+// fs_mutex is a mutex that sycns threads access to filesystem. This fucntion
+// waits of recv, but if anything is written to singal_fd immediently aborts.
 std::pair<bool, std::string>
 recv_file_stream(int sock,
                  fs::path out_file_path,
@@ -163,7 +164,8 @@ recv_file_stream(int sock,
                  std::mutex& fs_mutex,
                  int signal_fd)
 {
-    std::vector<uint8> file_content;
+    std::vector<uint8> file_content{};
+    file_content.reserve(4096);
     uint8 buffer[send_block_size];
     ssize_t len;
 
@@ -175,18 +177,12 @@ recv_file_stream(int sock,
 
     for (;;)
     {
-        logger.trace("Doing poll");
         poll(pfd, 2, -1);
         if (pfd[0].revents & POLLIN)
-        {
-            logger.trace("Thread interrupted.");
             return {false, "Interrupted"};
-        }
 
         if (pfd[1].revents & POLLIN)
-        {
             len = recv(sock, buffer, send_block_size, 0);
-        }
 
         if (len <= 0 || (expected_size && len > expected_size))
             break;
@@ -216,11 +212,41 @@ recv_file_stream(int sock,
     return {true, ""};
 }
 
-void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
+void send_dgram(int sock, send_packet const& packet)
 {
-    if (sendto(sock, data, size, 0, (sockaddr*)&remote_addr, sizeof(remote_addr)) != size)
-        logger.trace("failed to send data");
+    sendto(sock, packet.cmd.bytes, packet.msg_len, 0, (sockaddr*)&packet.addr, sizeof(packet.addr));
+    if (packet.msg_len != packet.msg_len)
+    {
+        if (errno == EAGAIN)
+            logger.trace("Didn't send packet because of timeout.");
+        else
+            logger.syserr("sendto");
+    }
+    else
+        logger.trace("sent. LEN: %lu. ADDR: %s:%s",
+                     packet.msg_len,
+                     addr_to_string(packet.addr.sin_addr).c_str(),
+                     std::to_string(ntohs(packet.addr.sin_port)).c_str());
 }
+
+send_packet recv_dgram(int sock)
+{
+    send_packet retval{};
+    int rcv_len = recvfrom(sock, retval.cmd.bytes, sizeof(retval.cmd.bytes), 0,
+                           (sockaddr*)&retval.addr, &retval.addr_len);
+    retval.msg_len = rcv_len;
+
+    if (rcv_len < 0)
+    {
+        if (errno == EAGAIN)
+            logger.trace("Didn't send packet because of timeout.");
+        else
+            logger.syserr("sendto");
+   }
+
+    return retval;
+}
+
 
 // TODO: recv_dgram
 

@@ -56,12 +56,14 @@ union command
 
     command();
 
+#if 0
     // These fucntions let us construct the response object and also return
     // their size which is the number of bytes user has to send.
     static std::pair<command, size_t> make_simpl(char const* head, uint64 cmd_seq,
-                                             uint8 const* data, size_t data_len);
+                                                 uint8 const* data, size_t data_len);
     static std::pair<command, size_t> make_cmplx(char const* head, uint64 cmd_seq,
                                              uint64 param, uint8 const* data, size_t data_len);
+#endif
 
     char const* get_head() const;
     void set_head(char const* val);
@@ -86,18 +88,52 @@ static_assert(sizeof(command::bytes) == 10 + sizeof(uint64) + sizeof(command::cm
 struct send_packet
 {
     command cmd;
-    sockaddr_in from_addr;
-    socklen_t from_addr_len;
+    size_t msg_len;
+    sockaddr_in addr;
+    socklen_t addr_len;
 
-    send_packet() : cmd{}, from_addr{} {
-        from_addr_len = sizeof(from_addr);
+    send_packet() : cmd{}, addr{} {
+        addr_len = sizeof(addr);
     }
 
     // TODO: Fix naming
-    send_packet(command cmd_, sockaddr_in from_addr_) {
+    send_packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
         this->cmd = cmd_;
-        this->from_addr = from_addr_;
-        this->from_addr_len = sizeof(from_addr_);
+        this->msg_len = msg_len_;
+        this->addr = addr_;
+        this->addr_len = sizeof(addr_);
+    }
+
+    static send_packet make_simpl(char const* head, uint64 cmd_seq,
+                                  uint8 const* data, size_t data_len,
+                                  sockaddr_in addr) {
+        send_packet retval{};
+        retval.addr = addr;
+        retval.msg_len = command::simpl_head_size + data_len;
+
+        retval.cmd.set_head(head);
+        retval.cmd.set_cmd_seq(cmd_seq);
+        if (data != nullptr)
+            retval.cmd.simpl.set_data(data, data_len);
+
+        return retval;
+    }
+
+    static send_packet make_cmplx(char const* head, uint64 cmd_seq,
+                                  uint64 param,
+                                  uint8 const* data, size_t data_len,
+                                  sockaddr_in addr) {
+        send_packet retval{};
+        retval.addr = addr;
+        retval.msg_len = command::cmplx_head_size + data_len;
+
+        retval.cmd.set_head(head);
+        retval.cmd.set_cmd_seq(cmd_seq);
+        retval.cmd.cmplx.set_param(param);
+        if (data != nullptr)
+            retval.cmd.cmplx.set_data(data, data_len);
+
+        return retval;
     }
 };
 

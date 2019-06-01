@@ -284,37 +284,38 @@ void send_file(int sock, std::vector<uint8> data)
     safe_close(sock);
 }
 
-static void handle_request_hello(int sock, send_packet const& packet, ssize_t msg_len)
+static void handle_request_hello(int sock, send_packet const& packet)
 {
     logger.trace_packet("Got", packet, cmd_type::simpl);
 
-    if (!packet.cmd.contains_required_fields(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "HELLO request too short");
+    if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "HELLO request too short");
         return;
     }
 
-    if (packet.cmd.contains_data(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "HELLO should not contain data");
+    if (packet.cmd.contains_data(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "HELLO should not contain data");
         return;
     }
 
-    auto[response, size] = command::make_cmplx(
+    send_packet send = send_packet::make_cmplx(
         "GOOD_DAY",
         packet.cmd.get_cmd_seq(),
         current_space < 0 ? 0 : current_space, // Handle the case when no space.
         (uint8 const*)(so.mcast_addr->c_str()),
-        so.mcast_addr->size());
+        so.mcast_addr->size(),
+        packet.addr);
 
-    logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
-    send_dgram(sock, packet.from_addr, response.bytes, size);
+    logger.trace_packet("Responding to", send, cmd_type::cmplx);
+    send_dgram(sock, send);
 }
 
-static void handle_request_list(int sock, send_packet const& packet, ssize_t msg_len)
+static void handle_request_list(int sock, send_packet const& packet)
 {
     logger.trace_packet("Got", packet, cmd_type::simpl);
 
-    if (!packet.cmd.contains_required_fields(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "LIST request too short");
+    if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "LIST request too short");
         return;
     }
 
@@ -355,39 +356,38 @@ static void handle_request_list(int sock, send_packet const& packet, ssize_t msg
 
     for (auto&& fnames_chunk : fnames_splited)
     {
-        auto[response, size] = command::make_simpl(
+        send_packet send = send_packet::make_simpl(
             "MY_LIST",
             packet.cmd.get_cmd_seq(),
             (uint8 const*)(fnames_chunk.c_str()),
-            fnames_chunk.size());
+            fnames_chunk.size(),
+            packet.addr);
 
-        logger.trace_packet("Responding to",
-                            send_packet{response, packet.from_addr},
-                            cmd_type::simpl);
-        send_dgram(sock, packet.from_addr, response.bytes, size);
+        logger.trace_packet("Responding", send, cmd_type::simpl);
+        send_dgram(sock, send);
     }
 }
 
-static void handle_request_get(int sock, send_packet const& packet, ssize_t msg_len)
+static void handle_request_get(int sock, send_packet const& packet)
 {
     logger.trace_packet("Got",packet, cmd_type::simpl);
-    if (!packet.cmd.contains_required_fields(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "GET request too short");
+    if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "GET request too short");
         return;
     }
 
-    if (!packet.cmd.contains_data(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "GET request must contain a filename");
+    if (!packet.cmd.contains_data(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "GET request must contain a filename");
         return;
     }
 
     std::string_view filename_sv{
         (char const*)packet.cmd.simpl.data,
-        msg_len - command::simpl_head_size
+        packet.msg_len - command::simpl_head_size
     };
 
     if (!sanitize_requested_path(filename_sv)) {
-        logger.pckg_error(packet.from_addr, "Invalid filename");
+        logger.pckg_error(packet.addr, "Invalid filename");
         return;
     }
 
@@ -396,45 +396,44 @@ static void handle_request_get(int sock, send_packet const& packet, ssize_t msg_
     if (exists)
     {
         auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
-
-        auto[response, size] = command::make_cmplx(
+        send_packet send = send_packet::make_cmplx(
             "CONNECT_ME",
             packet.cmd.get_cmd_seq(),
             ntohs(port),
             (uint8 const*)filename_sv.data(),
-            filename_sv.size());
+            filename_sv.size(),
+            packet.addr);
 
         workers.push_back(std::thread{send_file, socket, std::move(content)});
-
-        logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
-        send_dgram(sock, packet.from_addr, response.bytes, size);
+        logger.trace_packet("Responding to", send, cmd_type::cmplx);
+        send_dgram(sock, send);
     }
     else
     {
-        logger.pckg_error(packet.from_addr, "File does not exists");
+        logger.pckg_error(packet.addr, "File does not exists");
     }
 }
 
-static void handle_request_add(int sock, send_packet const& packet, ssize_t msg_len)
+static void handle_request_add(int sock, send_packet const& packet)
 {
     logger.trace_packet("Got", packet, cmd_type::cmplx);
-    if (!packet.cmd.contains_required_fields(cmd_type::cmplx, msg_len)) {
-        logger.pckg_error(packet.from_addr, "ADD request too short");
+    if (!packet.cmd.contains_required_fields(cmd_type::cmplx, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "ADD request too short");
         return;
     }
 
-    if (!packet.cmd.contains_data(cmd_type::cmplx, msg_len)) {
-        logger.pckg_error(packet.from_addr, "ADD request must contain a filename");
+    if (!packet.cmd.contains_data(cmd_type::cmplx, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "ADD request must contain a filename");
         return;
     }
 
     std::string_view filename_sv{
         (char const*)packet.cmd.cmplx.data,
-        msg_len - command::cmplx_head_size
+        packet.msg_len - command::cmplx_head_size
     };
 
     if (!sanitize_requested_path(filename_sv)) {
-        logger.pckg_error(packet.from_addr, "Invalid filename");
+        logger.pckg_error(packet.addr, "Invalid filename");
         return;
     }
 
@@ -446,52 +445,51 @@ static void handle_request_add(int sock, send_packet const& packet, ssize_t msg_
         auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
 
         workers.push_back(std::thread{receive_file, socket, std::move(file_path), packet.cmd.cmplx.get_param()});
-
-        auto[response, size] = command::make_cmplx(
+        send_packet send = send_packet::make_cmplx(
             "CAN_ADD",
             packet.cmd.get_cmd_seq(),
             ntohs(port),
-            (uint8 const*)filename_sv.data(),
-            filename_sv.size());
+            0, 0,
+            packet.addr);
 
-        logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
-        send_dgram(sock, packet.from_addr, response.bytes, size);
+        logger.trace_packet("Responding to", send, cmd_type::cmplx);
+        send_dgram(sock, send);
     }
     else
     {
         logger.trace("Could not add a file");
-
-        auto[response, size] = command::make_simpl(
+        send_packet send = send_packet::make_simpl(
             "NO_WAY",
             packet.cmd.get_cmd_seq(),
             (uint8 const*)filename_sv.data(),
-            filename_sv.size());
+            filename_sv.size(),
+            packet.addr);
 
-        logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::simpl);
-        send_dgram(sock, packet.from_addr, response.bytes, size);
+        logger.trace_packet("Responding to", send, cmd_type::simpl);
+        send_dgram(sock, send);
     }
 }
 
-static void handle_request_del(int sock, send_packet const& packet, ssize_t msg_len)
+static void handle_request_del(int sock, send_packet const& packet)
 {
     logger.trace_packet("Got", packet, cmd_type::simpl);
-    if (!packet.cmd.contains_required_fields(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "DEL request too short");
+    if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "DEL request too short");
         return;
     }
 
-    if (!packet.cmd.contains_data(cmd_type::simpl, msg_len)) {
-        logger.pckg_error(packet.from_addr, "DEL request must contain a filename");
+    if (!packet.cmd.contains_data(cmd_type::simpl, packet.msg_len)) {
+        logger.pckg_error(packet.addr, "DEL request must contain a filename");
         return;
     }
 
     std::string_view filename_sv{
         (char const*)packet.cmd.simpl.data,
-        msg_len - command::simpl_head_size
+        packet.msg_len - command::simpl_head_size
     };
 
     if (!sanitize_requested_path(filename_sv)) {
-        logger.pckg_error(packet.from_addr, "Invalid filename");
+        logger.pckg_error(packet.addr, "Invalid filename");
         return;
     }
 
@@ -511,47 +509,30 @@ int main(int argc, char const** argv)
     logger.trace("  SHRD_FLDR = %s", so.shrd_fldr->c_str());
     logger.trace("  TIMEOUT = %d", *so.timeout);
 
-    // Create a folder if it does not exists already.
-    // TODO: Check the output and fail miserably on error.
+    // This does nothing if the directory already exists.
     fs::create_directories(so.shrd_fldr->c_str());
     current_folder = fs::path{* so.shrd_fldr};
 
     index_files(* so.max_space);
 
-    // SERVER STUFF: (TODO: Move away!)
-    // argumenty wywołania programu
-    char const* multicast_dotted_address; // TODO: Dont use, we have a string for that in so.
-    in_port_t local_port;
-
-    // zmienne i struktury opisujące gniazda
     int sock;
-    sockaddr_in local_address, remote_address;
+    sockaddr_in local_address;
     ip_mreq ip_mreq;
-    unsigned int remote_len = sizeof(remote_address);
 
-    // zmienne obsługujące komunikację
-    ssize_t rcv_len;
-    int i;
-
-    multicast_dotted_address = so.mcast_addr->c_str();
-    local_port = (in_port_t)(* so.cmd_port);
-
-    // otworzenie gniazda
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
         logger.syserr("socket");
 
-    // podpięcie się do grupy rozsyłania (ang. multicast)
     ip_mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (inet_aton(multicast_dotted_address, &ip_mreq.imr_multiaddr) == 0)
+    if (inet_aton(so.mcast_addr->c_str(), &ip_mreq.imr_multiaddr) == 0)
         logger.syserr("inet_aton");
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)(&ip_mreq), sizeof(ip_mreq)) < 0)
         logger.syserr("setsockopt");
 
-    // podpięcie się pod lokalny adres i port
+    // bind to local address
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    local_address.sin_port = htons(local_port);
+    local_address.sin_port = htons((in_port_t)(* so.cmd_port));
     if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
@@ -578,45 +559,34 @@ int main(int argc, char const** argv)
     pfd[1].fd = sock;
     pfd[1].events = POLLIN | POLLERR | POLLHUP;
 
-    // czytanie tego, co odebrano
     for (;;)
     {
+        poll(pfd, 2, -1);
         send_packet response{};
-        int ret = poll(pfd, 2, -1);
 
         if (pfd[0].revents & POLLIN)
         {
-            logger.trace("Got interrupt signal. I'm gonna die now!");
+            logger.trace("Got interrupt signal.");
             break;
         }
 
         if (pfd[1].revents & POLLIN)
         {
-            rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
-                               (sockaddr*)&response.from_addr, &response.from_addr_len);
+            response = recv_dgram(sock);
         }
 
-        if (rcv_len < 0)
-        {
-            logger.syserr("recvfrom");
-        }
+        if (response.cmd.check_header("HELLO"))
+            handle_request_hello(sock, response);
+        else if (response.cmd.check_header("LIST"))
+            handle_request_list(sock, response);
+        else if (response.cmd.check_header("GET"))
+            handle_request_get(sock, response);
+        else if (response.cmd.check_header("ADD"))
+            handle_request_add(sock, response);
+        else if (response.cmd.check_header("DEL"))
+            handle_request_del(sock, response);
         else
-        {
-            logger.trace("read %zd bytes: %.*s", rcv_len, (int)rcv_len, response.cmd.bytes);
-
-            if (response.cmd.check_header("HELLO"))
-                handle_request_hello(sock, response, rcv_len);
-            else if (response.cmd.check_header("LIST"))
-                handle_request_list(sock, response, rcv_len);
-            else if (response.cmd.check_header("GET"))
-                handle_request_get(sock, response, rcv_len);
-            else if (response.cmd.check_header("ADD"))
-                handle_request_add(sock, response, rcv_len);
-            else if (response.cmd.check_header("DEL"))
-                handle_request_del(sock, response, rcv_len);
-            else
-                logger.pckg_error(response.from_addr, nullptr);
-        }
+            logger.pckg_error(response.addr, nullptr);
     }
 
     for (auto&& th : workers)
