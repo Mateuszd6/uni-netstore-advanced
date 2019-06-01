@@ -108,33 +108,6 @@ std::string get_input_line()
     return retval;
 }
 
-std::pair<bool, std::string>
-send_file_over_tcp(std::string const& addr,
-                   std::string const& port,
-                   std::vector<uint8> data)
-{
-    logger.trace("Sending %lu bytes to %s:%s", data.size(), addr.c_str(), port.c_str());
-    int sock = connect_to_stream(addr.c_str(), port.c_str(), chrono::seconds{*co.timeout});
-    if (sock < 0)
-        return {false, "Cound not connect to the server"};
-
-    ssize_t send_len;
-    if ((send_len = send_stream(sock, data.data(), data.size())) != data.size())
-    {
-        safe_close(sock);
-        if (send_len == -1 && errno == EPIPE)
-            return {false, "Socket closed by server"};
-        else if (send_len == -1 && errno == EAGAIN)
-            return {false, "Timeout"};
-        else
-            return {false, "Error sending the file"};
-    }
-
-    logger.trace("Sending successfull");
-    safe_close(sock);
-    return {true, ""};
-}
-
 template<typename T>
 struct basic_packet_handler
 {
@@ -393,7 +366,7 @@ void packets_thread(int sock)
 void try_upload_file(int sock,
                      sockaddr_in remote_address,
                      std::string filename,
-                     std::vector<uint8> file_data)
+                     fs::path file_path)
 {
     logger.trace("Fetching the list");
     uint64 fetch_packet_id = cmd_seq_counter++;
@@ -414,12 +387,18 @@ void try_upload_file(int sock,
                   return x.free_space > y.free_space;
               });
 
+    // Obtain the file size without loading it into memory (for speed).
+    FILE* f = fopen(file_path.string().c_str(), "r");
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fclose(f);
+
     logger.trace("Got %lu servers. Querying...", servers.size());
     std::optional<accept_msg_content> server_agreement = {};
     for(auto&& serv : servers)
     {
         uint64 packet_id = cmd_seq_counter++;
-        send_packet send = send_packet::make_cmplx("ADD", packet_id, file_data.size(),
+        send_packet send = send_packet::make_cmplx("ADD", packet_id, file_size,
                                                    (uint8 const*)filename.c_str(),
                                                    filename.size(), serv.uaddr);
 
@@ -446,7 +425,14 @@ void try_upload_file(int sock,
         std::string port_str = std::to_string(server_agreement->awaiting_port_num);
 
         logger.trace("Starting TCP conn at port %s", port_str.c_str());
-        auto[success, reason] = send_file_over_tcp(addr_str, port_str, file_data);
+        int sock = connect_to_stream(addr_str.c_str(), port_str.c_str(), chrono::seconds{*co.timeout});
+
+        auto[success, reason] = (sock < 0
+                                 ? std::make_tuple(false, std::string{"Cound not connect to the server"})
+                                 : stream_file(sock, file_path));
+
+        if (sock > 0)
+            safe_close(sock);
 
         if (success)
         {
@@ -794,17 +780,16 @@ main(int argc, char** argv)
             std::string filename{upload_file_path.filename().string()};
 
             // We load the whole file into memory to avoid races.
-            auto[exists, data] = load_file_if_exists(upload_file_path);
-            if (exists)
+            if (fs::exists(upload_file_path))
             {
-                logger.trace("File %s(%s) exists, and has %lu bytes",
-                             upload_file_path.c_str(), filename.c_str(), data.size());
+                logger.trace("File %s(%s) exists",
+                             upload_file_path.c_str(), filename.c_str());
 
                 workers.push_back(std::thread{try_upload_file,
                                               sock,
                                               remote_address,
                                               std::move(filename),
-                                              std::move(data)});
+                                              std::move(upload_file_path)});
             }
             else
                 logger.println("File %s does not exist", upload_file_path.c_str());

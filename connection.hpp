@@ -168,6 +168,11 @@ recv_file_stream(int sock,
     file_content.reserve(4096);
     uint8 buffer[send_block_size];
     ssize_t len;
+    size_t len_total;
+
+    FILE* output_file_hndl;
+    if (!(output_file_hndl = fopen(out_file_path.c_str(), "w+")))
+        return {false, "Could not create a file"};
 
     struct pollfd pfd[2];
     pfd[0].fd = signal_fd;
@@ -188,8 +193,11 @@ recv_file_stream(int sock,
             break;
 
         logger.trace("Got %lu bytes", len);
-        std::copy(buffer, buffer + len, std::back_inserter(file_content));
+        fwrite(buffer, len, 1, output_file_hndl);
+        len_total += len;
     }
+
+    fclose(output_file_hndl);
 
     if (len < 0)
     {
@@ -199,16 +207,9 @@ recv_file_stream(int sock,
             return {false, "Error while reading the socket"};
     }
 
-    if (expected_size && file_content.size() != *expected_size)
+    if (expected_size && len_total != *expected_size)
         return {false, "File size does not match expectation"};
 
-    std::lock_guard<std::mutex> m{fs_mutex};
-    FILE* output_file_hndl;
-    if (!(output_file_hndl = fopen(out_file_path.c_str(), "w+")))
-        return {false, "Could not create a file"};
-
-    fwrite(file_content.data(), file_content.size(), 1, output_file_hndl);
-    fclose(output_file_hndl);
     return {true, ""};
 }
 
@@ -247,34 +248,29 @@ send_packet recv_dgram(int sock)
     return retval;
 }
 
-// TODO: FS MUTEX!
-// If file exists this will load its content into the vector and return (true,
-// content) pair, otherwise (false, _) is returned, where _ could be anything.
-std::pair<bool, std::vector<uint8>>
-load_file_if_exists(fs::path file_path)
+std::pair<bool, std::string> stream_file(int sock, fs::path file_path)
 {
-    std::vector<uint8> content{};
-    if (fs::exists(file_path))
+    uint8 buffer[send_block_size];
+    FILE* f = fopen(file_path.string().c_str(), "r");
+    size_t read;
+    bool send_error = false;
+
+    while ((read = fread(buffer, 1, send_block_size, f)) > 0)
     {
-        FILE* f = fopen(file_path.string().c_str(), "r");
-
-        // Determine file size
-        fseek(f, 0, SEEK_END);
-        size_t size = ftell(f);
-        char* buffer = new char[size];
-
-        rewind(f);
-        fread(buffer, sizeof(char), size, f);
-        content.resize(size);
-        for (int i = 0; i < size; ++i)
-            content[i] = buffer[i];
-
-        delete[] buffer;
-
-        return {true, content};
+        ssize_t sent = send_stream(sock, buffer, read);
+        if (sent == -1)
+        {
+            if (errno = EAGAIN)
+                return {false, "Tiemout while sending the file"};
+            else
+                return {false, "Error while sending the file"};
+        }
     }
 
-    return {false, content};
+    if (errno) // Read error.
+        return {false, "Error while sending the file"};
+
+    return {true, ""};
 }
 
 #endif // CONNECTION_HPP

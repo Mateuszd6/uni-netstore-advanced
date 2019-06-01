@@ -207,6 +207,7 @@ bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size
     if (!succeess)
     {
         logger.trace("Error downloading the file: %s", reason.c_str());
+        fs::remove(file_path); // Remove the destination, whetever was there.
         return false;
     }
 
@@ -231,25 +232,34 @@ void receive_file(int sock, fs::path file_path, size_t expected_size)
 }
 
 // Same as above, this fucntion closes sock.
-void send_file(int sock, std::vector<uint8> data)
+void send_file(int sock, fs::path file_path)
 {
     int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
     if (msg_sock > 0)
     {
         logger.trace("Accepted. Sending the data");
-        ssize_t sent = send_stream(msg_sock, data.data(), data.size());
-        if (sent == -1)
+        uint8 buffer[send_block_size];
+        FILE* f = fopen(file_path.string().c_str(), "r");
+        size_t read;
+        bool send_error = false;
+
+        while ((read = fread(buffer, 1, send_block_size, f)) > 0)
         {
-            if (errno = EAGAIN)
-                logger.trace("Tiemout while sending the file");
-            else
-                logger.trace("Error while sending the file");
+            ssize_t sent = send_stream(msg_sock, buffer, read);
+            if (sent == -1)
+            {
+                if (errno = EAGAIN)
+                    logger.trace("Tiemout while sending the file");
+                else
+                    logger.trace("Error while sending the file");
+
+                send_error = true;
+                break;
+            }
         }
 
-        if (sent != data.size())
-            logger.trace("File wasn't fully send");
-        else
-            logger.trace("File sent");
+        if (!send_error && errno) // Read error.
+            logger.trace("Error reading the file");
 
         safe_close(msg_sock);
     }
@@ -364,8 +374,7 @@ static void handle_request_get(int sock, send_packet const& packet)
     }
 
     fs::path file_path{current_folder / std::string{filename_sv}};
-    auto[exists, content] = load_file_if_exists(file_path);
-    if (exists)
+    if (fs::exists(file_path))
     {
         auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
         send_packet send = send_packet::make_cmplx(
@@ -376,7 +385,7 @@ static void handle_request_get(int sock, send_packet const& packet)
             filename_sv.size(),
             packet.addr);
 
-        workers.push_back(std::thread{send_file, socket, std::move(content)});
+        workers.push_back(std::thread{send_file, socket, std::move(file_path)});
         logger.trace_packet("Responding to", send, cmd_type::cmplx);
         send_dgram(sock, send);
     }
@@ -417,8 +426,8 @@ static void handle_request_add(int sock, send_packet const& packet)
     if (try_alloc_file(file_path, (ssize_t)packet.cmd.cmplx.get_param()))
     {
         auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
-
         workers.push_back(std::thread{receive_file, socket, std::move(file_path), packet.cmd.cmplx.get_param()});
+
         send_packet send = send_packet::make_cmplx(
             "CAN_ADD",
             packet.cmd.get_cmd_seq(),
