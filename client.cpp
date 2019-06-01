@@ -73,6 +73,9 @@ static std::vector<search_entry> last_search_result{};
 static std::mutex awaitng_packets_mutex{};
 static std::unordered_map<uint64, std::unique_ptr<work_queue<send_packet>>> awaiting_packets{};
 
+// Filesystem access mutex.
+static std::mutex fs_mutex{};
+
 // We could use iostreams here, but for consistency, lets not use them.
 std::string get_input_line()
 {
@@ -128,49 +131,13 @@ load_file_if_exists(fs::path file_path)
 }
 
 std::pair<bool, std::string>
-receive_file_over_tcp(char const* addr, char const* port, fs::path out_file_path)
+send_file_over_tcp(std::string const& addr,
+                   std::string const& port,
+                   std::vector<uint8> data)
 {
-    logger.trace("Receiving file %s from %s:%s", out_file_path.c_str(), addr, port);
+    logger.trace("Sending %lu bytes to %s:%s", data.size(), addr.c_str(), port.c_str());
 
-    int sock = connect_to_stream(addr, port, chrono::seconds{*co.timeout});
-    if (sock < 0)
-        return {false, "Cound not connect to the server"};
-
-    std::vector<uint8> file_content;
-    uint8 buffer[send_block_size];
-    ssize_t len;
-    while ((len = read(sock, buffer, send_block_size)) > 0)
-    {
-        logger.trace("Got %lu bytes", len);
-        std::copy(buffer, buffer + len, std::back_inserter(file_content));
-    }
-
-    safe_close(sock);
-
-    if (len < 0)
-    {
-        if (errno == EAGAIN)
-            return {false, "Server timeout"};
-        else
-            return {false, "Error while reading the socket"};
-    }
-
-    std::ofstream output_file{out_file_path, std::ofstream::binary};
-    if (output_file.fail())
-        return {false, "Could not create a file"};
-
-    output_file.write((char const*)file_content.data(), file_content.size());
-    output_file.close();
-    logger.trace("File saved successfully");
-    return {true, ""};
-}
-
-std::pair<bool, std::string>
-send_file_over_tcp(char const* addr, char const* port, std::vector<uint8> data)
-{
-    logger.trace("Sending %lu bytes to %s:%s", data.size(), addr, port);
-
-    int sock = connect_to_stream(addr, port, chrono::seconds{*co.timeout});
+    int sock = connect_to_stream(addr.c_str(), port.c_str(), chrono::seconds{*co.timeout});
     if (sock < 0)
     {
         return {false, "Cound not connect to the server"};
@@ -200,6 +167,7 @@ protected:
     virtual T get_result() { return T{}; }
 
 public:
+    work_queue<send_packet>* my_work_queue;
     uint64 const cmd_seq;
     bool aborted;
 
@@ -215,13 +183,13 @@ public:
             cmd_seq,
             std::make_unique<work_queue<send_packet>>(chrono::system_clock::now() +
                                                       chrono::seconds{*co.timeout}));
+
+        my_work_queue = awaiting_packets[cmd_seq].get();
     }
 
     T receive_packets(uint64 cmd_seq) {
         for (;;) {
-            // Its safer to use at instread of [], because of the thread safety.
-            std::lock_guard<std::mutex> m{awaitng_packets_mutex};
-            std::optional<send_packet> c = awaiting_packets[cmd_seq]->consume();
+            std::optional<send_packet> c = my_work_queue->consume();
             if (!c.has_value())
             {
                 logger.trace("No more [%lu] packets", cmd_seq);
@@ -476,13 +444,11 @@ void try_upload_file(int sock,
         std::string port_str = std::to_string(server_agreement->awaiting_port_num);
 
         logger.trace("Starting TCP conn at port %s", port_str.c_str());
-        auto[success, reason] = send_file_over_tcp(addr_str.c_str(),
-                                                   port_str.c_str(),
-                                                   file_data);
+        auto[success, reason] = send_file_over_tcp(addr_str, port_str, file_data);
 
         if (success)
         {
-            logger.println("File {%s} uploaded (%s:%s)",
+            logger.println("File %s uploaded (%s:%s)",
                            filename.c_str(),
                            addr_str.c_str(),
                            port_str.c_str());
@@ -500,7 +466,9 @@ void try_upload_file(int sock,
         logger.println("File %s too big", filename.c_str());
 }
 
-void try_receive_file(int sock, search_entry found_server, std::string filename)
+void try_receive_file(int sock,
+                      search_entry found_server,
+                      std::string filename)
 {
     uint64 packet_id = cmd_seq_counter++;
     get_packet_handler ph{packet_id};
@@ -522,51 +490,51 @@ void try_receive_file(int sock, search_entry found_server, std::string filename)
         return;
     }
 
-    bool failed = false;
-    std::string fail_reason = "";
     std::string uaddr_str = "";
     std::string port_str = "";
 
+    // This lambda will be use to report errors.
+    auto report_error =
+        [&](std::string const& reason) {
+            logger.println("File %s downloading failed (%s:%s) %s",
+                           filename.c_str(),
+                           uaddr_str.c_str(),
+                           port_str.c_str(),
+                           reason.c_str());
+        };
+
     if (!server_agreement)
     {
-        failed = true;
-        fail_reason = "Server did not respond";
+        report_error("Server did not respond");
+        return;
     }
 
-    if (!failed)
+    fs::path out{* co.out_fldr};
+    out /= filename;
+
+    uaddr_str = addr_to_string(server_agreement->uaddr.sin_addr);
+    port_str = std::to_string(server_agreement->awaiting_port_num);
+
+    logger.trace("Receiving file %s from %s:%s", out.c_str(), uaddr_str.c_str(), port_str.c_str());
+    int stream_sock = connect_to_stream(uaddr_str, port_str, chrono::seconds{*co.timeout});
+    if (stream_sock < 0)
     {
-        fs::path out{* co.out_fldr};
-        out /= filename;
-
-        uaddr_str = addr_to_string(server_agreement->uaddr.sin_addr);
-        port_str = std::to_string(server_agreement->awaiting_port_num);
-
-        auto[success, reason] = receive_file_over_tcp(uaddr_str.c_str(),
-                                                      port_str.c_str(),
-                                                      out);
-
-        if (!success)
-        {
-            failed = true;
-            fail_reason = std::move(reason);
-        }
+        report_error("Cound not connect to the server");
+        return;
     }
 
-    if (failed)
+    auto[success, reason] = recv_file_stream(stream_sock, out, std::nullopt, fs_mutex);
+    safe_close(stream_sock);
+    if (!success)
     {
-        logger.println("File %s downloading failed (%s:%s) %s",
-                       filename.c_str(),
-                       uaddr_str.c_str(),
-                       port_str.c_str(),
-                       fail_reason.c_str());
+        report_error(reason);
+        return;
     }
-    else
-    {
-        logger.println("File %s downloaded (%s:%d)",
-                       filename.c_str(),
-                       addr_to_string(server_agreement->uaddr.sin_addr).c_str(),
-                       server_agreement->awaiting_port_num);
-    }
+
+    logger.println("File %s downloaded (%s:%d)",
+                   filename.c_str(),
+                   addr_to_string(server_agreement->uaddr.sin_addr).c_str(),
+                   server_agreement->awaiting_port_num);
 }
 
 client_options parse_args(int argc, char** argv)
@@ -576,11 +544,10 @@ client_options parse_args(int argc, char** argv)
     {
         uint32 arg_hashed = strhash(argv[i]);
 
+        // Every arg has a pair.
         if (i == argc - 1)
             logger.fatal("Invalid arguments");
 
-        // The constexpr trick will speed up string lookups, as we don't have to
-        // invoke string compare.
         switch (arg_hashed)
         {
             case strhash("-g"): { // MCAST_ADDR
@@ -669,6 +636,7 @@ main(int argc, char** argv)
 
     timeval tv = chrono_to_posix(chrono::seconds{*co.timeout});
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+    // TODO: Send timeout.
 
     // HACK: We can't really use signalfd as we used in the server to stop the
     // threads, because in this case we have two; one awaiting packets, and one

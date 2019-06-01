@@ -19,9 +19,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-namespace fs = std::filesystem;
-namespace chrono = std::chrono;
-using namespace std::chrono_literals;
 
 #include "common.hpp"
 #include "cmd.hpp"
@@ -40,6 +37,7 @@ struct server_options
 // we will use this mutex to make sure, that only one thread is accessing the
 // folder, modifiying the capacity size, etc.
 static std::mutex fs_mutex{};
+
 static fs::path current_folder;
 static ssize_t current_space = 0;
 
@@ -53,11 +51,10 @@ server_options parse_args(int argc, char const** argv)
     for (int i = 1; i < argc; ++i) {
         uint32 arg_hashed = strhash(argv[i]);
 
+        // Every arg has a pair.
         if (i == argc - 1)
             logger.fatal("Invalid arguments");
 
-        // The constexpr trick will speed up string lookups, as we don't have to
-        // invoke string compare.
         switch (arg_hashed) {
             case strhash("-g"): { // MCAST_ADDR
                 ++i;
@@ -213,8 +210,6 @@ bool try_alloc_file(fs::path file_path, ssize_t size)
     return true;
 }
 
-// TODO: Should we remember files we've saved, or should we just just filesystem
-//       to do that?
 // This assumes that the file name is sanitized.
 bool try_delete_file(fs::path const& file_path)
 {
@@ -228,134 +223,62 @@ bool try_delete_file(fs::path const& file_path)
         return true;
     }
 
-    logger.trace("ERROR: File does not exists!");
+    logger.trace("File %s does not exists!", file_path.c_str());
     return false;
 }
 
-void tcp_read_file(int sock, fs::path file_path, size_t expected_size)
+bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size)
 {
-    timeval tv = chrono_to_posix(chrono::seconds{* so.timeout});
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-
-    int msg_sock;
-    sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-    bool stream_error = false;
-
-    // get client connection from the socket
-    msg_sock = accept(sock, (sockaddr *)(&client_addr), &client_addr_len);
-    if (msg_sock < 0)
+    auto[succeess, reason] = recv_file_stream(msg_sock, file_path, expected_size, fs_mutex);
+    if (!succeess)
     {
-        if (errno == EAGAIN)
-        {
-            logger.trace("timeout while waiting for client to connect");
-            stream_error = true;
-        }
-        else
-            logger.syserr("accept");
+        logger.trace("Error downloading the file: %s", reason.c_str());
+        return false;
     }
 
-    std::vector<uint8> file_content{};
-    if (!stream_error)
-    {
-        // Now we have to set read timeout independently.
-        setsockopt(msg_sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-
-        uint8 buffer[1024];
-        ssize_t len;
-        while ((len = read(msg_sock, buffer, 1024)) > 0 &&
-               file_content.size() <= expected_size)
-        {
-            std::copy(buffer, buffer + len, std::back_inserter(file_content));
-        }
-
-        if (len < 0)
-        {
-            if (errno == EAGAIN)
-            {
-                logger.trace("timeout while reading the file.");
-                stream_error = true;
-            }
-            else
-                logger.syserr("reading from client socket");
-        }
-
-        if (!stream_error && file_content.size() != expected_size) {
-            logger.trace("Sent file does not match the expected size!");
-            stream_error = true;
-        }
-
-        safe_close(msg_sock);
-    }
-
-    safe_close(sock);
-    if (!stream_error)
-    {
-        std::lock_guard<std::mutex> m{fs_mutex};
-
-        logger.trace("Writing %lu bytes the file: %s", file_content.size(), file_path.c_str());
-
-        // As we succeeded we must subscrat the file size from the server pool.
-        std::ofstream output_file{file_path};
-        if (output_file.fail())
-        {
-            logger.trace("ERROR: Could not create a file!");
-            stream_error = true;
-        }
-        else
-        {
-            output_file.write((char const*)file_content.data(), file_content.size());
-            output_file.close();
-            logger.trace("File saved successfully");
-        }
-    }
-
-    if (stream_error)
-    {
-        logger.trace("Streaming error. File has not been saved");
-        current_space += expected_size;
-    }
+    logger.trace("File %s saved successfully", file_path.c_str());
+    return true;
 }
 
-void send_file_tcp(int sock, std::vector<uint8> data)
+// This function is what will be called asyncly and is responsible for closing
+// the given socket.
+void receive_file(int sock, fs::path file_path, size_t expected_size)
 {
-    // TODO: Copypaste
-    timeval tv = chrono_to_posix(chrono::seconds{* so.timeout});
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-
-    int msg_sock;
-    sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-    bool stream_error = false;
-
-    // get client connection from the socket
-    msg_sock = accept(sock, (sockaddr *)(&client_addr), &client_addr_len);
-    if (msg_sock < 0)
-    {
-        if (errno == EAGAIN)
-        {
-            logger.trace("timeout while waiting for client to connect");
-            stream_error = true;
-        }
-        else
-            logger.syserr("accept");
-    }
-
-    logger.trace("Accepted. Sending the data");
-    if (!stream_error)
-    {
-        ssize_t sent = send_stream(msg_sock, data.data(), data.size());
-        if (sent != data.size())
-            stream_error = true;
-    }
-
-    if (stream_error)
-        logger.trace("An error has occured. File wasn't sent correctly");
-    else
-        logger.trace("File sent.");
-
+    int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
     if (msg_sock > 0)
+    {
+        // If file uploading failed, give the reserved space back.
+        if (!try_read_file_stream(msg_sock, file_path, expected_size))
+            current_space += expected_size;
+
         safe_close(msg_sock);
+    }
+    safe_close(sock);
+}
+
+// Same as above, this fucntion closes sock.
+void send_file(int sock, std::vector<uint8> data)
+{
+    int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
+    if (msg_sock > 0)
+    {
+        logger.trace("Accepted. Sending the data");
+        ssize_t sent = send_stream(msg_sock, data.data(), data.size());
+        if (sent == -1)
+        {
+            if (errno = EAGAIN)
+                logger.trace("Tiemout while sending the file");
+            else
+                logger.trace("Error while sending the file");
+        }
+
+        if (sent != data.size())
+            logger.trace("File wasn't fully send");
+        else
+            logger.trace("File sent");
+
+        safe_close(msg_sock);
+    }
     safe_close(sock);
 }
 
@@ -470,7 +393,7 @@ static void handle_request_get(int sock, send_packet const& packet, ssize_t msg_
     auto[exists, content] = load_file_if_exists(file_path);
     if (exists)
     {
-        auto[socket, port] = init_stream_conn();
+        auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
 
         auto[response, size] = command::make_cmplx(
             "CONNECT_ME",
@@ -479,7 +402,7 @@ static void handle_request_get(int sock, send_packet const& packet, ssize_t msg_
             (uint8 const*)filename_sv.data(),
             filename_sv.size());
 
-        workers.push_back(std::thread{send_file_tcp, socket, content});
+        workers.push_back(std::thread{send_file, socket, std::move(content)});
 
         logger.trace_packet("Responding to", send_packet{response, packet.from_addr}, cmd_type::cmplx);
         send_dgram(sock, packet.from_addr, response.bytes, size);
@@ -518,10 +441,9 @@ static void handle_request_add(int sock, send_packet const& packet, ssize_t msg_
     fs::path file_path{current_folder / filename_sv};
     if (try_alloc_file(file_path, (ssize_t)packet.cmd.cmplx.get_param()))
     {
-        auto[socket, port] = init_stream_conn();
+        auto[socket, port] = init_stream_conn(chrono::seconds{*so.timeout});
 
-        logger.trace("Listening on port %hu", ntohs(port));
-        workers.push_back(std::thread{tcp_read_file, socket, file_path, packet.cmd.cmplx.get_param()});
+        workers.push_back(std::thread{receive_file, socket, std::move(file_path), packet.cmd.cmplx.get_param()});
 
         auto[response, size] = command::make_cmplx(
             "CAN_ADD",
@@ -656,8 +578,6 @@ int main(int argc, char const** argv)
     // czytanie tego, co odebrano
     for (;;)
     {
-        logger.trace("Sleeping on poll...");
-
         send_packet response{};
         int ret = poll(pfd, 2, -1);
 
@@ -669,7 +589,6 @@ int main(int argc, char const** argv)
 
         if (pfd[1].revents & POLLIN)
         {
-            logger.trace("Got client");
             rcv_len = recvfrom(sock, response.cmd.bytes, sizeof(response.cmd.bytes), 0,
                                (sockaddr*)&response.from_addr, &response.from_addr_len);
         }

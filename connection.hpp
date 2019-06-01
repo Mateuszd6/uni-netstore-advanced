@@ -36,7 +36,7 @@ std::string addr_to_string(in_addr addr)
 }
 
 // Open up TCP socket on a random port.
-std::pair<int, in_port_t> init_stream_conn()
+std::pair<int, in_port_t> init_stream_conn(chrono::seconds timeout)
 {
     int sock;
     struct sockaddr_in server_address;
@@ -62,10 +62,17 @@ std::pair<int, in_port_t> init_stream_conn()
     if (listen(sock, 5) < 0)
         logger.syserr("listen");
 
+    timeval tv = chrono_to_posix(timeout);
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (timeval*)&tv, sizeof(timeval));
+
+    logger.trace("Listening on port %hu", ntohs(server_address.sin_port));
     return {sock, server_address.sin_port};
 }
 
-int connect_to_stream(char const* addr, char const* port, chrono::microseconds timeout)
+int connect_to_stream(std::string const& addr,
+                      std::string const& port,
+                      chrono::microseconds timeout)
 {
     int sock;
     addrinfo addr_hints;
@@ -76,10 +83,8 @@ int connect_to_stream(char const* addr, char const* port, chrono::microseconds t
     addr_hints.ai_family = AF_INET;
     addr_hints.ai_socktype = SOCK_STREAM;
     addr_hints.ai_protocol = IPPROTO_TCP;
-    if (getaddrinfo(addr, port, &addr_hints, &addr_result) != 0)
-    {
+    if (getaddrinfo(addr.c_str(), port.c_str(), &addr_hints, &addr_result) != 0)
         return -1;
-    }
 
     // initialize socket according to getaddrinfo results
     sock = socket(addr_result->ai_family, addr_result->ai_socktype, addr_result->ai_protocol);
@@ -92,6 +97,7 @@ int connect_to_stream(char const* addr, char const* port, chrono::microseconds t
 
     timeval tv = chrono_to_posix(timeout);
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (timeval*)&tv, sizeof(timeval));
 
     // connect socket to the server
     if (connect(sock, addr_result->ai_addr, addr_result->ai_addrlen) < 0)
@@ -106,7 +112,31 @@ int connect_to_stream(char const* addr, char const* port, chrono::microseconds t
     return sock;
 }
 
-// TODO: rename, coz its used also when receiving.
+int accept_client_stream(int sock, chrono::seconds timeout)
+{
+    int msg_sock;
+    sockaddr_in client_addr;
+    socklen_t client_addr_len = sizeof(client_addr);
+
+    // get client connection from the socket
+    msg_sock = accept(sock, (sockaddr *)(&client_addr), &client_addr_len);
+    if (msg_sock < 0)
+    {
+        if (errno == EAGAIN)
+            logger.trace("Timeout while waiting for client to connect");
+        else
+            logger.syserr("accept");
+
+        return -1;
+    }
+
+    // Now we have to set read timeout independently from the sock timeout.
+    timeval tv = chrono_to_posix(timeout);
+    setsockopt(msg_sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+    setsockopt(msg_sock, SOL_SOCKET, SO_SNDTIMEO, (timeval*)&tv, sizeof(timeval));
+    return msg_sock;
+}
+
 constexpr static size_t send_block_size = 4096;
 
 // Sends count bytes over tcp socket. Returns -1 on error.
@@ -114,7 +144,7 @@ ssize_t send_stream(int fd, uint8* buffer, size_t count) {
     for (size_t i = 0; i < count;) {
         ssize_t chunk_len = i + send_block_size > count ? count - i : send_block_size;
         ssize_t send_data = 0;
-        send_data = write(fd, buffer + i, chunk_len);
+        send_data = send(fd, buffer + i, chunk_len, 0);
         if (send_data == -1) {
             return -1;
         }
@@ -125,31 +155,46 @@ ssize_t send_stream(int fd, uint8* buffer, size_t count) {
     return count;
 }
 
-// Loads count bytes from tcp socket. Returns number of received bytes.
-ssize_t recv_stream(int fd, uint8* buffer, size_t count) {
-    if (count == 0)
-        return 0;
+// fs_mutex is a mutex that sycns threads access to filesystem.
+std::pair<bool, std::string>
+recv_file_stream(int sock,
+                 fs::path out_file_path,
+                 std::optional<size_t> expected_size,
+                 std::mutex& fs_mutex)
+{
+    std::vector<uint8> file_content;
+    uint8 buffer[send_block_size];
+    ssize_t len;
 
-    ssize_t remained = count;
-    ssize_t loaded = 0;
-    while (remained > 0) {
-        // if read failed, return -1, the caller can check errno.
-        int bytes_red = read(fd, buffer + loaded, remained);
-        if (bytes_red == -1)
-            return -1;
-
-        if (bytes_red == 0) {
-            return loaded;
-        }
-
-        assert(bytes_red <= remained);
-        remained -= bytes_red;
-        loaded += bytes_red;
+    // If expected size is specified, dont load more bytes than we need to
+    // report an invalid size error.
+    while ((len = recv(sock, buffer, send_block_size, 0)) > 0 &&
+           (!expected_size || len <= expected_size))
+    {
+        logger.trace("Got %lu bytes", len);
+        std::copy(buffer, buffer + len, std::back_inserter(file_content));
     }
 
-    return loaded;
-}
+    if (len < 0)
+    {
+        if (errno == EAGAIN)
+            return {false, "Timeout"};
+        else
+            return {false, "Error while reading the socket"};
+    }
 
+    if (expected_size && file_content.size() != *expected_size)
+        return {false, "File size does not match expectation"};
+
+    std::lock_guard<std::mutex> m{fs_mutex};
+    FILE* output_file_hndl;
+    if (!(output_file_hndl = fopen(out_file_path.c_str(), "w+")))
+        return {false, "Could not create a file"};
+
+    fwrite(file_content.data(), file_content.size(), 1, output_file_hndl);
+    fclose(output_file_hndl);
+    return {true, ""};
+}
 
 void send_dgram(int sock, sockaddr_in remote_addr, uint8* data, size_t size)
 {
