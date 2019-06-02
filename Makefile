@@ -20,11 +20,11 @@ SERVER_OBJ=server.o
 CLIENT_EXE=netstore-client
 SERVER_EXE=netstore-server
 
-release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
-release: all
-
 debug: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
 debug: all
+
+release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
+release: all
 
 .cpp.o:
 	$(CC) $(CFLAGS) -c $< -o $@

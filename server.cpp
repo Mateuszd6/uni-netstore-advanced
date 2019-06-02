@@ -29,6 +29,7 @@ struct server_options
     std::optional<int64> max_space = 52428800;
     std::optional<int32> cmd_port = {};
     std::optional<int32> timeout = 5;
+    std::optional<bool> synchronized = false;
 };
 
 static std::mutex fs_mutex{};
@@ -80,13 +81,19 @@ static server_options parse_args(int argc, char const** argv)
                 retval.timeout = std::atoi(argv[i]);
             } break;
 
+            case strhash("-s"): { // SYNCHRONIZED
+                ++i;
+                retval.synchronized = (bool)(std::atoi(argv[i]));
+            } break;
+
             default:
                 logger.fatal("Invalid arguments");
         }
     }
 
     // If any of the fields is null, a required field was not set, so we exit.
-    if (!retval.mcast_addr || !retval.shrd_fldr || !retval.max_space || !retval.cmd_port || !retval.timeout)
+    if (!retval.mcast_addr || !retval.shrd_fldr || !retval.max_space || !retval.cmd_port
+        || !retval.timeout || !retval.synchronized)
         logger.fatal("Missing required arguments");
 
     if (*retval.timeout < 0 || *retval.timeout > 300)
@@ -94,7 +101,6 @@ static server_options parse_args(int argc, char const** argv)
 
     if (*retval.cmd_port < 0 || *retval.cmd_port > 65535)
         logger.fatal("Invalid port");
-
 
     return retval;
 }
@@ -472,9 +478,11 @@ int main(int argc, char const** argv)
     logger.trace("  MAX_SPACE = %ld", *so.max_space);
     logger.trace("  SHRD_FLDR = %s", so.shrd_fldr->c_str());
     logger.trace("  TIMEOUT = %d", *so.timeout);
+    logger.trace("  SYNCHRONIZED = %s", *so.synchronized ? "true" : "false");
 
     // This does nothing if the directory already exists.
-    fs::create_directories(so.shrd_fldr->c_str());
+    try { fs::create_directories(so.shrd_fldr->c_str()); }
+    catch (...) {}
     current_folder = fs::path{* so.shrd_fldr};
 
     index_files(* so.max_space);

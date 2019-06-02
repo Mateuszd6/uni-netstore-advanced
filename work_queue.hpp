@@ -30,13 +30,11 @@ public:
         bool q = cv.wait_until(m, timeout, [this]{ return !packet_queue.empty() || aborted; });
         if (!q)
         {
-            logger.trace("TIMEOUT!");
             timeouted = true;
             return {};
         }
         else if (aborted) // TODO: empty queue check?
         {
-            logger.trace("ABORT!");
             return {};
         }
         else

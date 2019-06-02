@@ -187,10 +187,7 @@ public:
         for (;;) {
             std::optional<packet> c = my_work_queue->consume();
             if (!c.has_value())
-            {
-                logger.trace("No more [%lu] packets", cmd_seq);
                 break;
-            }
 
             if (on_packet_receive(c.value()))
                 break;
@@ -584,14 +581,10 @@ main(int argc, char** argv)
     logger.trace("  TIMEOUT = %d", *co.timeout);
 
     // This does nothing if the directory already exists.
-
     fs::path output_fldr{* co.out_fldr};
-    try {
-        fs::create_directories(output_fldr);
-    }
+    try { fs::create_directories(output_fldr); }
     catch(...) { }
 
-    // zmienne i struktury opisujące gniazda
     int sock, optval;
     sockaddr_in remote_address, local_address;
 
@@ -799,6 +792,5 @@ main(int argc, char** argv)
         }
     }
 
-    // koniec
     safe_close(sock);
 }
