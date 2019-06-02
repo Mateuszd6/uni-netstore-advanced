@@ -114,3 +114,47 @@ bool command::contains_data(cmd_type type, ssize_t msg_size) const
     else
         return false;
 }
+
+packet::packet() : cmd{}, addr{} {
+    addr_len = sizeof(addr);
+                  }
+
+// TODO: Fix naming
+packet::packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
+    this->cmd = cmd_;
+    this->msg_len = msg_len_;
+    this->addr = addr_;
+    this->addr_len = sizeof(addr_);
+}
+
+packet packet::make_simpl(char const* head, uint64 cmd_seq,
+                         uint8 const* data, size_t data_len,
+                         sockaddr_in addr) {
+    packet retval{};
+    retval.addr = addr;
+    retval.msg_len = command::simpl_head_size + data_len;
+
+    retval.cmd.set_head(head);
+    retval.cmd.set_cmd_seq(cmd_seq);
+    if (data != nullptr)
+        retval.cmd.simpl.set_data(data, data_len);
+
+    return retval;
+}
+
+packet packet::make_cmplx(char const* head, uint64 cmd_seq,
+                         uint64 param,
+                         uint8 const* data, size_t data_len,
+                         sockaddr_in addr) {
+    packet retval{};
+    retval.addr = addr;
+    retval.msg_len = command::cmplx_head_size + data_len;
+
+    retval.cmd.set_head(head);
+    retval.cmd.set_cmd_seq(cmd_seq);
+    retval.cmd.cmplx.set_param(param);
+    if (data != nullptr)
+        retval.cmd.cmplx.set_data(data, data_len);
+
+    return retval;
+}

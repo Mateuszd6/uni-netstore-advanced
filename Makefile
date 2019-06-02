@@ -13,7 +13,7 @@ WARN_FLAGS=-Wall -Wextra -Wshadow #-Weverything -Wno-old-style-cast -Wno-sign-co
 # students has completly broken sanitizer dependencies.
 SANITIZERS=#-fsanitize=undefined
 
-COMMON_OBJ=cmd.o common.o logger.o
+COMMON_OBJ=cmd.o connection.o logger.o
 CLIENT_OBJ=client.o
 SERVER_OBJ=server.o
 

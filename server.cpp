@@ -238,9 +238,15 @@ static void send_file(int sock, fs::path file_path)
     int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
     if (msg_sock > 0)
     {
-        auto[success, _] = stream_file(msg_sock, file_path);
+        auto[success, reason] = stream_file(msg_sock, file_path, signal_fd);
+        if (!success)
+            logger.trace("Error while streaming file %s. Reason: %s",
+                         file_path.string().c_str(), reason.c_str());
+
         safe_close(msg_sock);
     }
+    else
+        logger.trace("Client didn't connect to download %s", file_path.string().c_str());
 
     safe_close(sock);
 }
@@ -494,6 +500,13 @@ int main(int argc, char const** argv)
     if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
+    // TODO? Should I?
+#if 0
+    timeval tv = chrono_to_posix(chrono::seconds{*co.timeout});
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (timeval*)&tv, sizeof(timeval));
+#endif
+
     // Create a sigset of all the signals that we're interested in. Also block
     // the signals in order for signalfd to receive them
     sigset_t sigset;
@@ -509,7 +522,7 @@ int main(int argc, char const** argv)
     if (signal_fd < 0)
         logger.syserr("signalfd");
 
-    struct pollfd pfd[2];
+    pollfd pfd[2];
     pfd[0].fd = signal_fd;
     pfd[0].events = POLLIN | POLLERR | POLLHUP;
     pfd[1].fd = sock;

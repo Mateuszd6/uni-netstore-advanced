@@ -56,15 +56,6 @@ union command
 
     command();
 
-#if 0
-    // These fucntions let us construct the response object and also return
-    // their size which is the number of bytes user has to send.
-    static std::pair<command, size_t> make_simpl(char const* head, uint64 cmd_seq,
-                                                 uint8 const* data, size_t data_len);
-    static std::pair<command, size_t> make_cmplx(char const* head, uint64 cmd_seq,
-                                             uint64 param, uint8 const* data, size_t data_len);
-#endif
-
     char const* get_head() const;
     void set_head(char const* val);
 
@@ -92,49 +83,18 @@ struct packet
     sockaddr_in addr;
     socklen_t addr_len;
 
-    packet() : cmd{}, addr{} {
-        addr_len = sizeof(addr);
-    }
+    packet();
 
-    // TODO: Fix naming
-    packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
-        this->cmd = cmd_;
-        this->msg_len = msg_len_;
-        this->addr = addr_;
-        this->addr_len = sizeof(addr_);
-    }
+    packet(command cmd_, size_t msg_len_, sockaddr_in addr_);
 
     static packet make_simpl(char const* head, uint64 cmd_seq,
-                                  uint8 const* data, size_t data_len,
-                                  sockaddr_in addr) {
-        packet retval{};
-        retval.addr = addr;
-        retval.msg_len = command::simpl_head_size + data_len;
-
-        retval.cmd.set_head(head);
-        retval.cmd.set_cmd_seq(cmd_seq);
-        if (data != nullptr)
-            retval.cmd.simpl.set_data(data, data_len);
-
-        return retval;
-    }
+                             uint8 const* data, size_t data_len,
+                             sockaddr_in addr);
 
     static packet make_cmplx(char const* head, uint64 cmd_seq,
-                                  uint64 param,
-                                  uint8 const* data, size_t data_len,
-                                  sockaddr_in addr) {
-        packet retval{};
-        retval.addr = addr;
-        retval.msg_len = command::cmplx_head_size + data_len;
-
-        retval.cmd.set_head(head);
-        retval.cmd.set_cmd_seq(cmd_seq);
-        retval.cmd.cmplx.set_param(param);
-        if (data != nullptr)
-            retval.cmd.cmplx.set_data(data, data_len);
-
-        return retval;
-    }
+                             uint64 param,
+                             uint8 const* data, size_t data_len,
+                             sockaddr_in addr);
 };
 
 #endif // CMD_HPP

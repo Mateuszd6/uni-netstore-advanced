@@ -382,7 +382,7 @@ protected:
 
 static void packets_thread(int sock)
 {
-    struct pollfd pfd[2];
+    pollfd pfd[2];
     pfd[0].fd = signal_fd;
     pfd[0].events = POLLIN | POLLERR | POLLHUP;
     pfd[1].fd = sock;
@@ -478,7 +478,7 @@ static void try_upload_file(int sock,
 
         auto[success, reason] = (stream_sock < 0
                                  ? std::make_tuple(false, std::string{"Cound not connect to the server"})
-                                 : stream_file(stream_sock, file_path));
+                                 : stream_file(stream_sock, file_path, signal_fd));
 
         if (stream_sock > 0)
             safe_close(stream_sock);
@@ -593,7 +593,6 @@ main(int argc, char** argv)
 
     // zmienne i struktury opisujące gniazda
     int sock, optval;
-    //  struct sockaddr_in local_address;
     sockaddr_in remote_address, local_address;
 
     sock = socket(AF_INET, SOCK_DGRAM, 0);

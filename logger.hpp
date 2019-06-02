@@ -1,10 +1,5 @@
-#ifndef LOGGER_H
-#define LOGGER_H
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <sys/socket.h>
+#ifndef LOGGER_HPP
+#define LOGGER_HPP
 
 #include <cerrno>
 #include <cstring>
@@ -38,4 +33,4 @@ public:
 
 extern logger_t logger;
 
-#endif // LOGGER_H
+#endif // LOGGER_HPP

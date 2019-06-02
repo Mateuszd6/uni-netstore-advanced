@@ -1,5 +1,10 @@
 #include "logger.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <sys/socket.h>
+
 void logger_t::trace(char const* fmt, ...) {
     (void(fmt));
 #ifdef TRACE
@@ -78,7 +83,7 @@ void logger_t::syserr(char const* fmt, ...)
     // fprintf(stderr, "\033[0m");
     fprintf(stderr, "\n");
 
-    exit(2); // TODO: Use safe exit function!
+    exit(2);
 }
 
 [[noreturn]]
@@ -95,7 +100,7 @@ void logger_t::fatal(char const* fmt, ...)
     // fprintf(stderr, "\033[0m");
     fprintf(stderr, "\n");
 
-    exit(1); // TODO: Use safe exit function!
+    exit(1);
 }
 
 void logger_t::pckg_error(sockaddr_in const& addr, char const* reason)
