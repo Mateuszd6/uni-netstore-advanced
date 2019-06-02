@@ -1,13 +1,13 @@
 .PHONY: all debug release clean
 
-CC=clang++
+CC=g++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -DTRACE -fno-omit-frame-pointer
 RELEASE_FLAGS=-O3 -DNDEBUG
 INCLUDE_FLAGS=-I.
 LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
-WARN_FLAGS=-Wall -Wextra -Wshadow #-Weverything -Wno-old-style-cast -Wno-sign-conversion -Wno-c++98-compat
+WARN_FLAGS=-Wall -Wextra -Wshadow
 
 # students has completly broken sanitizer dependencies.
 SANITIZERS=#-fsanitize=undefined
@@ -19,11 +19,11 @@ SERVER_OBJ=server.o
 CLIENT_EXE=netstore-client
 SERVER_EXE=netstore-server
 
-debug: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
-debug: all
-
 release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
 release: all
+
+debug: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
+debug: all
 
 .cpp.o:
 	$(CC) $(CFLAGS) -c $< -o $@
