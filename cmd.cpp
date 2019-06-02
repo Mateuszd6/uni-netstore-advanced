@@ -60,18 +60,18 @@ void command::clear() { bzero(&bytes[0], upd_max_data_size); }
 
 bool command::contains_required_fields(cmd_type type, ssize_t msg_size) const {
   if (type == cmd_type::cmplx)
-    return msg_size >= command::cmplx_head_size;
+    return msg_size >= (ssize_t)command::cmplx_head_size;
   else if (type == cmd_type::simpl)
-    return msg_size >= command::simpl_head_size;
+    return msg_size >= (ssize_t)command::simpl_head_size;
   else
     return false;
 }
 
 bool command::contains_data(cmd_type type, ssize_t msg_size) const {
   if (type == cmd_type::cmplx)
-    return msg_size > command::cmplx_head_size;
+    return msg_size > (ssize_t)command::cmplx_head_size;
   else if (type == cmd_type::simpl)
-    return msg_size > command::simpl_head_size;
+    return msg_size > (ssize_t)command::simpl_head_size;
   else
     return false;
 }

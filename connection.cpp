@@ -224,7 +224,7 @@ recv_file_stream(int sock, fs::path out_file_path,
 void send_dgram(int sock, packet const &packet) {
   ssize_t sent = sendto(sock, packet.cmd.bytes, packet.msg_len, 0,
                         (sockaddr const *)(&packet.addr), sizeof(packet.addr));
-  if (sent != packet.msg_len) {
+  if (sent != (ssize_t)packet.msg_len) {
     if (errno == EAGAIN)
       logger.trace("Didn't send packet because of timeout.");
     else

@@ -4,10 +4,10 @@ CC=g++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -DTRACE -fno-omit-frame-pointer
-RELEASE_FLAGS=-O3 -g -DNDEBUG
+RELEASE_FLAGS=-O2 -DNDEBUG
 INCLUDE_FLAGS=-I.
 LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
-WARN_FLAGS=-Wall -Wextra -Wshadow -Wno-sign-compare
+WARN_FLAGS=-Wall -Wextra
 
 # students has completly broken sanitizer dependencies.
 SANITIZERS= #-fsanitize=undefined
