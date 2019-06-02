@@ -53,7 +53,6 @@ struct available_server
     size_t free_space;
 };
 
-// TODO: rename?
 struct accept_msg_content
 {
     sockaddr_in uaddr;
@@ -216,16 +215,14 @@ protected:
             return false;
         }
 
-        std::string_view cmd_data{
-            (char const*)packet.cmd.cmplx.get_data(),
-            packet.msg_len - command::cmplx_head_size
-        };
+        std::string_view cmd_data = packet.data_as_sv(cmd_type::cmplx);
 
         if (!packet.cmd.contains_required_fields(cmd_type::cmplx, packet.msg_len)) {
             logger.pckg_error(packet.addr, "GOOD_DAY response too short");
             return false;
         }
 
+        // Check if the address is valid.
         if (!packet.cmd.contains_data(cmd_type::cmplx, packet.msg_len) ||
             !string_to_addr(std::string{cmd_data}))
         {
@@ -266,26 +263,21 @@ protected:
             return false;
         }
 
-        std::string_view cmd_data{
-            (char const*)packet.cmd.simpl.get_data(),
-            packet.msg_len - command::simpl_head_size
-        };
-
         if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
             logger.pckg_error(packet.addr, "MY_LIST response too short");
             return false;
         }
 
-        uint8 const* str = &packet.cmd.simpl.data[0];
-        while (*str)
+        std::string_view cmd_data = packet.data_as_sv(cmd_type::simpl);
+        char const* str = &cmd_data[0];
+        while (str != &*cmd_data.end())
         {
-            uint8 const* p = str;
+            char const* p = str;
             while (*p && *p != '\n')
                 ++p;
 
             search_result.emplace_back(
-                search_entry{std::string{(char const*)str, (size_t)(p - str)},
-                             packet.addr});
+                search_entry{std::string{str, (size_t)(p - str)}, packet.addr});
 
             if (*p == '\n')
                 ++p;
@@ -377,6 +369,9 @@ protected:
     }
 };
 
+// This is called in a separete thread. It dispatches incomming messages, checks
+// if anyone is waiting for the given one (by checking cmd_seq) and if so, puts
+// it in the work_queue so that its process by the apropiate pckg handler.
 static void packets_thread(int sock)
 {
     pollfd pfd[2];
@@ -410,9 +405,9 @@ static void packets_thread(int sock)
 }
 
 static void try_upload_file(int sock,
-                     sockaddr_in remote_address,
-                     std::string filename,
-                     fs::path file_path)
+                            sockaddr_in remote_address,
+                            std::string filename,
+                            fs::path file_path)
 {
     logger.trace("Fetching the list");
     uint64 fetch_packet_id = cmd_seq_counter++;
@@ -669,7 +664,8 @@ main(int argc, char** argv)
             packet_handler.join();
             logger.trace("Joined packet handler!");
 
-            // Abort all work in the work queue.
+            // Abort all work in the work queue. This will notify all threads
+            // working in packet handlers.
             {
                 std::lock_guard<std::mutex> m{awaitng_packets_mutex};
                 for (auto&& it : awaiting_packets)
@@ -694,7 +690,7 @@ main(int argc, char** argv)
             std::vector<available_server> available_servers{};
             available_servers = ph.receive_packets();
             if (ph.aborted)
-                continue;
+                break;
 
             for (auto&& i : available_servers)
             {
@@ -717,12 +713,8 @@ main(int argc, char** argv)
             // This will block the main thread.
             last_search_result.clear();
             last_search_result = ph.receive_packets();
-#if 0
-            if (ph.aborted) {
-                logger.trace("packet handling aborted!");
-                return;
-            }
-#endif
+            if (ph.aborted)
+                break;
 
             for (auto&& i : last_search_result)
             {
@@ -778,14 +770,13 @@ main(int argc, char** argv)
             fs::path upload_file_path{std::string(param)};
             std::string filename{upload_file_path.filename().string()};
 
-            // We load the whole file into memory to avoid races.
             if (fs::exists(upload_file_path))
             {
                 workers.push_back(std::thread{try_upload_file,
-                                              sock,
-                                              remote_address,
-                                              std::move(filename),
-                                              std::move(upload_file_path)});
+                            sock,
+                            remote_address,
+                            std::move(filename),
+                            std::move(upload_file_path)});
             }
             else
                 logger.println("File %s does not exist", upload_file_path.c_str());

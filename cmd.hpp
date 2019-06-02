@@ -24,8 +24,6 @@ union command
     constexpr static size_t cmplx_head_size = common_header_size + sizeof(uint64);
     constexpr static size_t cmplx_max_data = upd_max_data_size - cmplx_head_size;
 
-    // TODO: Concider changing chars to uint8's.
-    // TODO(IMPORTANT): Doing it with strlen is badd, because packets may contains 0s.
     struct __attribute__((__packed__))
     {
         char head[10];
@@ -86,6 +84,8 @@ struct packet
     packet();
 
     packet(command cmd_, size_t msg_len_, sockaddr_in addr_);
+
+    std::string_view data_as_sv(cmd_type type) const;
 
     static packet make_simpl(char const* head, uint64 cmd_seq,
                              uint8 const* data, size_t data_len,

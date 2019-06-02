@@ -43,11 +43,8 @@ uint8 const* cmd_simpl_t::get_data() const
 
 void cmd_simpl_t::set_data(uint8 const* val, size_t data_len)
 {
-    // TODO: Test for equal
     assert(data_len <= command::simpl_max_data);
     memcpy(data, val, data_len);
-
-    // TODO: Zero out the rest of the structure?
 }
 
 uint8 const* cmd_cmplx_t::get_data() const
@@ -57,11 +54,8 @@ uint8 const* cmd_cmplx_t::get_data() const
 
 void cmd_cmplx_t::set_data(uint8 const* val, size_t data_len)
 {
-    // TODO: Test for equal
     assert(data_len <= command::simpl_max_data);
     memcpy(data, val, data_len);
-
-    // TODO: Zero out the rest of the structure?
 }
 
 uint64 cmd_cmplx_t::get_param() const
@@ -119,12 +113,31 @@ packet::packet() : cmd{}, addr{} {
     addr_len = sizeof(addr);
                   }
 
-// TODO: Fix naming
 packet::packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
     this->cmd = cmd_;
     this->msg_len = msg_len_;
     this->addr = addr_;
     this->addr_len = sizeof(addr_);
+}
+
+std::string_view packet::data_as_sv(cmd_type type) const {
+
+    if (type == cmd_type::simpl)
+    {
+        return std::string_view{
+            (char const*)cmd.simpl.get_data(),
+            msg_len - command::simpl_head_size
+        };
+    }
+    else if (type == cmd_type::cmplx)
+    {
+        return std::string_view{
+            (char const*)cmd.cmplx.get_data(),
+            msg_len - command::cmplx_head_size
+        };
+    }
+    else
+        return std::string_view{};
 }
 
 packet packet::make_simpl(char const* head, uint64 cmd_seq,

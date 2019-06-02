@@ -58,11 +58,9 @@ void logger_t::println(char const* fmt, ...)
     std::lock_guard<std::mutex> m{logger_mutex};
 
     va_list args;
-    // fprintf(stdout, "\033[1;35m");
     va_start(args, fmt);
     vfprintf(stdout, fmt, args);
     va_end(args);
-    // fprintf(stdout, "\033[0m");
     fprintf(stdout, "\n");
 }
 
@@ -72,7 +70,6 @@ void logger_t::syserr(char const* fmt, ...)
     std::lock_guard<std::mutex> m{logger_mutex};
 
     va_list args;
-    // fprintf(stderr, "\033[1;31m");
     fprintf(stderr, "ERROR: ");
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -80,7 +77,6 @@ void logger_t::syserr(char const* fmt, ...)
 
     if (errno != 0)
         fprintf(stderr, " Errno: %d(%s)", errno, strerror(errno));
-    // fprintf(stderr, "\033[0m");
     fprintf(stderr, "\n");
 
     exit(2);
@@ -92,12 +88,10 @@ void logger_t::fatal(char const* fmt, ...)
     std::lock_guard<std::mutex> m{logger_mutex};
 
     va_list args;
-    // fprintf(stderr, "\033[1;31m");
     fprintf(stderr, "ERROR: ");
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
-    // fprintf(stderr, "\033[0m");
     fprintf(stderr, "\n");
 
     exit(1);
@@ -107,14 +101,12 @@ void logger_t::pckg_error(sockaddr_in const& addr, char const* reason)
 {
     std::lock_guard<std::mutex> m{logger_mutex};
 
-    std::string sender_ip{inet_ntoa(addr.sin_addr)}; // TODO: THIS CAN FAIL!
+    std::string sender_ip{inet_ntoa(addr.sin_addr)};
     uint32 sender_port = htons(addr.sin_port);
-    // fprintf(stderr, "\033[1;31m");
     fprintf(stderr, "[PCKG ERROR] Skipping invalid package from %s:%u. %s",
             sender_ip.c_str(),
             sender_port,
             reason ? reason : "");
-    // fprintf(stderr, "\033[0m");
     fprintf(stderr, "\n");
 }
 

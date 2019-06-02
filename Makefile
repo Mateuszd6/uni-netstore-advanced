@@ -1,4 +1,3 @@
-# TODO: Better make for boost libs?
 .PHONY: all debug release clean
 
 CC=clang++

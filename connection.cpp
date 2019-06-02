@@ -183,7 +183,10 @@ recv_file_stream(int sock,
 
     FILE* output_file_hndl;
     if (!(output_file_hndl = fopen(out_file_path.c_str(), "w+")))
+    {
+        logger.trace("Error opening file %s", out_file_path.c_str());
         return {false, "Could not create a file"};
+    }
 
     pollfd pfd[2];
     pfd[0].fd = signal_fd;
@@ -203,7 +206,13 @@ recv_file_stream(int sock,
         if (len <= 0 || (expected_size && len > expected_size))
             break;
 
-        fwrite(buffer, len, 1, output_file_hndl);
+        ssize_t write_result = fwrite(buffer, len, 1, output_file_hndl);
+        if (write_result <= 0) {
+            // A filesystem error. Somebody removed a file or something.
+            fclose(output_file_hndl);
+            return {false, "Write error"};
+        }
+
         len_total += len;
     }
 
@@ -218,7 +227,10 @@ recv_file_stream(int sock,
     }
 
     if (expected_size && len_total != *expected_size)
+    {
+        logger.trace("Invalid size, got: %lu, expected: %lu", len_total, *expected_size);
         return {false, "File size does not match expectation"};
+    }
 
     return {true, ""};
 }
@@ -233,11 +245,6 @@ void send_dgram(int sock, packet const& packet)
         else
             logger.syserr("sendto");
     }
-    else
-        logger.trace("sent. LEN: %lu. ADDR: %s:%s",
-                     packet.msg_len,
-                     addr_to_string(packet.addr.sin_addr).c_str(),
-                     std::to_string(ntohs(packet.addr.sin_port)).c_str());
 }
 
 packet recv_dgram(int sock)

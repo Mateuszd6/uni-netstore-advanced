@@ -33,7 +33,7 @@ public:
             timeouted = true;
             return {};
         }
-        else if (aborted) // TODO: empty queue check?
+        else if (aborted)
         {
             return {};
         }
