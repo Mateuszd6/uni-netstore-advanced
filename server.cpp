@@ -1,4 +1,3 @@
-#include <cassert>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <csignal>
@@ -11,7 +10,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <fstream>
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -29,8 +27,8 @@ struct server_options
     std::optional<std::string> mcast_addr = {};
     std::optional<std::string> shrd_fldr = {};
     std::optional<int64> max_space = 52428800;
-    std::optional<uint32> cmd_port = {};
-    std::optional<uint32> timeout = 5;
+    std::optional<int32> cmd_port = {};
+    std::optional<int32> timeout = 5;
 };
 
 static std::mutex fs_mutex{};
@@ -43,8 +41,10 @@ static server_options so;
 
 static int signal_fd;
 
+static std::vector<std::thread> workers{};
+
 // TODO: This should throw invalid value and report error by usage msg.
-server_options parse_args(int argc, char const** argv)
+static server_options parse_args(int argc, char const** argv)
 {
     server_options retval{};
     for (int i = 1; i < argc; ++i) {
@@ -62,14 +62,12 @@ server_options parse_args(int argc, char const** argv)
 
             case strhash("-p"): { // CMD_PORT
                 ++i;
-                int32 port = std::atoi(argv[i]);
-                retval.cmd_port = port;
+                retval.cmd_port = std::atoi(argv[i]);
             } break;
 
             case strhash("-b"): { // MAX_SPACE
                 ++i;
-                int64 space_limit = std::atoll(argv[i]);
-                retval.max_space = space_limit;
+                retval.max_space = std::atoll(argv[i]);
             } break;
 
             case strhash("-f"): { // SHRD_FLDR
@@ -79,8 +77,7 @@ server_options parse_args(int argc, char const** argv)
 
             case strhash("-t"): { // TIMEOUT
                 ++i;
-                int32 timeout = std::min(std::atoi(argv[i]), 300);
-                retval.timeout = timeout;
+                retval.timeout = std::atoi(argv[i]);
             } break;
 
             default:
@@ -90,18 +87,21 @@ server_options parse_args(int argc, char const** argv)
 
     // If any of the fields is null, a required field was not set, so we exit.
     if (!retval.mcast_addr || !retval.shrd_fldr || !retval.max_space || !retval.cmd_port || !retval.timeout)
-    {
         logger.fatal("Missing required arguments");
-    }
+
+    if (*retval.timeout < 0 || *retval.timeout > 300)
+        logger.fatal("Invalid timeout");
+
+    if (*retval.cmd_port < 0 || *retval.cmd_port > 65535)
+        logger.fatal("Invalid port");
+
 
     return retval;
 }
 
-static std::vector<std::thread> workers{};
-
 // Valid path is one that does not contain '/' and has size > 0. we also
 // blacklist .. which might be tricky on some systems.
-bool sanitize_requested_path(std::string_view filename)
+static bool sanitize_requested_path(std::string_view filename)
 {
     return (filename.size() > 0 &&
             filename.find('/') == std::string_view::npos &&
@@ -109,7 +109,7 @@ bool sanitize_requested_path(std::string_view filename)
             filename != "..");
 }
 
-void index_files(int64 max_space)
+static void index_files(int64 max_space)
 {
     // TODO: We dont really need a mutex here...
     std::lock_guard<std::mutex> m{fs_mutex};
@@ -131,7 +131,7 @@ void index_files(int64 max_space)
 // This function will not split the filenames so that they do not exceed udp msg
 // size. The reason is because it runs under the mutex, so we don't want it to
 // waste more time.
-std::string make_filenames_list(std::string const& pattern)
+static std::string make_filenames_list(std::string const& pattern)
 {
     std::lock_guard<std::mutex> m{fs_mutex};
 
@@ -160,7 +160,7 @@ std::string make_filenames_list(std::string const& pattern)
 }
 
 // This assumes that the filename is valid.
-bool try_alloc_file(fs::path file_path, ssize_t size)
+static bool try_alloc_file(fs::path file_path, ssize_t size)
 {
     std::lock_guard<std::mutex> m{fs_mutex};
 
@@ -182,7 +182,7 @@ bool try_alloc_file(fs::path file_path, ssize_t size)
 }
 
 // This assumes that the file name is sanitized.
-bool try_delete_file(fs::path const& file_path)
+static bool try_delete_file(fs::path const& file_path)
 {
     std::lock_guard<std::mutex> m{fs_mutex};
 
@@ -198,7 +198,7 @@ bool try_delete_file(fs::path const& file_path)
     return false;
 }
 
-bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size)
+static bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size)
 {
     auto[succeess, reason] = recv_file_stream(msg_sock, file_path, expected_size, signal_fd);
     if (!succeess)
@@ -214,8 +214,9 @@ bool try_read_file_stream(int msg_sock, fs::path file_path, size_t expected_size
 
 // This function is what will be called asyncly and is responsible for closing
 // the given socket.
-void receive_file(int sock, fs::path file_path, size_t expected_size)
+static void receive_file(int sock, fs::path file_path, size_t expected_size)
 {
+    // If failed whatever reason, bring the memory back to the pool.
     int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
     if (msg_sock > 0)
     {
@@ -225,41 +226,22 @@ void receive_file(int sock, fs::path file_path, size_t expected_size)
 
         safe_close(msg_sock);
     }
+    else
+        current_space += expected_size;
+
     safe_close(sock);
 }
 
 // Same as above, this fucntion closes sock.
-void send_file(int sock, fs::path file_path)
+static void send_file(int sock, fs::path file_path)
 {
     int msg_sock = accept_client_stream(sock, chrono::seconds{* so.timeout});
     if (msg_sock > 0)
     {
-        logger.trace("Accepted. Sending the data");
-        uint8 buffer[send_block_size];
-        FILE* f = fopen(file_path.string().c_str(), "r");
-        size_t read;
-        bool send_error = false;
-
-        while ((read = fread(buffer, 1, send_block_size, f)) > 0)
-        {
-            ssize_t sent = send_stream(msg_sock, buffer, read);
-            if (sent == -1)
-            {
-                if (errno == EAGAIN)
-                    logger.trace("Tiemout while sending the file");
-                else
-                    logger.trace("Error while sending the file");
-
-                send_error = true;
-                break;
-            }
-        }
-
-        if (!send_error && errno) // Read error.
-            logger.trace("Error reading the file");
-
+        auto[success, _] = stream_file(msg_sock, file_path);
         safe_close(msg_sock);
     }
+
     safe_close(sock);
 }
 
@@ -512,17 +494,15 @@ int main(int argc, char const** argv)
     if (bind(sock, (sockaddr*)&local_address, sizeof(local_address)) < 0)
         logger.syserr("bind");
 
-    // TODO: Dont use asserts, just syserr's
-    // Create a sigset of all the signals that we're interested in
+    // Create a sigset of all the signals that we're interested in. Also block
+    // the signals in order for signalfd to receive them
     sigset_t sigset;
-    int err = sigemptyset(&sigset);
-    assert(err == 0);
-    err = sigaddset(&sigset, SIGINT);
-    assert(err == 0);
-
-    // We must block the signals in order for signalfd to receive them
-    err = sigprocmask(SIG_BLOCK, &sigset, nullptr);
-    assert(err == 0);
+    if (sigemptyset(&sigset) != 0)
+        logger.syserr("sigemptyset");
+    if (sigaddset(&sigset, SIGINT) != 0)
+        logger.syserr("sigaddset");
+    if (sigprocmask(SIG_BLOCK, &sigset, nullptr) != 0)
+        logger.syserr("sigprocmask");
 
     // Create the signalfd
     signal_fd = signalfd(-1, &sigset, 0);

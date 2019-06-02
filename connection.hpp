@@ -8,6 +8,13 @@
 #include "common.cpp"
 #include "logger.hpp"
 
+constexpr static size_t send_block_size = 62000;
+
+// Since inet_ntoa returns a pointer to the buffer, which content is replaced
+// with another call, we must sync the inet_ntoa calls. After the call we copy
+// the result and return as std::string.
+static std::mutex ntoa_mutex{};
+
 void safe_close(int sock)
 {
     if (close(sock) < 0)
@@ -22,11 +29,6 @@ std::optional<in_addr> string_to_addr(std::string const& str)
 
     return retval;
 }
-
-// Since inet_ntoa returns a pointer to the buffer, which content is replaced
-// with another call, we must sync the inet_ntoa calls. After the call we copy
-// the result and return as std::string.
-static std::mutex ntoa_mutex{};
 
 std::string addr_to_string(in_addr addr)
 {
@@ -137,8 +139,6 @@ int accept_client_stream(int sock, chrono::seconds timeout)
     return msg_sock;
 }
 
-constexpr static size_t send_block_size = 62000;
-
 // Sends count bytes over tcp socket. Returns -1 on error.
 ssize_t send_stream(int fd, uint8* buffer, size_t count) {
     for (size_t i = 0; i < count;) {
@@ -191,7 +191,6 @@ recv_file_stream(int sock,
         if (len <= 0 || (expected_size && len > expected_size))
             break;
 
-        logger.trace("Got %lu bytes", len);
         fwrite(buffer, len, 1, output_file_hndl);
         len_total += len;
     }
@@ -206,8 +205,6 @@ recv_file_stream(int sock,
             return {false, "Error while reading the socket"};
     }
 
-    if (expected_size)
-        logger.trace("Size: current: %lu, expected: %lu\n", len_total, *expected_size);
     if (expected_size && len_total != *expected_size)
         return {false, "File size does not match expectation"};
 

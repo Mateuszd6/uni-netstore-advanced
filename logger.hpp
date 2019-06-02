@@ -6,7 +6,6 @@
 #include <netinet/ip.h>
 #include <sys/socket.h>
 
-#include <cassert>
 #include <cerrno>
 #include <cstring>
 #include <cstdarg>

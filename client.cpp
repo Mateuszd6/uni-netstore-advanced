@@ -18,16 +18,12 @@
 #include <netdb.h>
 
 #include <atomic>
-#include <fstream>
 #include <vector>
 #include <string>
 #include <thread>
-#include <chrono>
-#include <boost/filesystem.hpp>
 #include <mutex>
 #include <unordered_map>
 #include <future>
-namespace fs = boost::filesystem;
 
 #include "common.hpp"
 #include "work_queue.hpp"
@@ -40,8 +36,8 @@ struct client_options
 {
     std::optional<std::string> mcast_addr = {};
     std::optional<std::string> out_fldr = {};
-    std::optional<uint32> cmd_port = {};
-    std::optional<uint32> timeout = 5;
+    std::optional<int32> cmd_port = {};
+    std::optional<int32> timeout = 5;
 };
 
 struct search_entry
@@ -77,8 +73,59 @@ static std::unordered_map<uint64, std::unique_ptr<work_queue<packet>>> awaiting_
 // abort its work. Used not to block the threads on recv (along with poll).
 static int signal_fd;
 
+client_options parse_args(int argc, char** argv)
+{
+    client_options retval{};
+    for (int i = 1; i < argc; ++i)
+    {
+        uint32 arg_hashed = strhash(argv[i]);
+
+        // Every arg has a pair.
+        if (i == argc - 1)
+            logger.fatal("Invalid arguments");
+
+        switch (arg_hashed)
+        {
+            case strhash("-g"): { // MCAST_ADDR
+                ++i;
+                retval.mcast_addr = std::string{argv[i]};
+            } break;
+
+            case strhash("-p"): { // CMD_PORT
+                ++i;
+                retval.cmd_port = std::stoi(argv[i]);
+            } break;
+
+            case strhash("-o"): { // OUT_FLDR
+                ++i;
+                retval.out_fldr = std::string{argv[i]};
+            } break;
+
+            case strhash("-t"): { // TIMEOUT
+                ++i;
+                retval.timeout = std::stoi(argv[i]);
+            } break;
+
+            default:
+                logger.fatal("Invalid arguments");
+        }
+    }
+
+    // If any of the fields is null, a required field was not set, so we exit.
+    if (!retval.mcast_addr || !retval.out_fldr || !retval.cmd_port || !retval.timeout)
+        logger.fatal("Missing required arguments");
+
+    if (*retval.timeout < 0 || *retval.timeout > 300)
+        logger.fatal("Invalid timeout");
+
+    if (*retval.cmd_port < 0 || *retval.cmd_port > 65535)
+        logger.fatal("Invalid port");
+
+    return retval;
+}
+
 // We could use iostreams here, but for consistency, lets not use them.
-std::string get_input_line()
+static std::string get_input_line()
 {
     char* lineptr = nullptr;
     size_t n = 0;
@@ -128,8 +175,6 @@ public:
         // Subscribe for packets:
         std::lock_guard<std::mutex> m{awaitng_packets_mutex};
 
-        // TODO: Don't do it, or if it happens, change the packed seq num
-        assert(awaiting_packets.count(cmd_seq) == 0);
         awaiting_packets.emplace(
             cmd_seq,
             std::make_unique<work_queue<packet>>(chrono::system_clock::now() +
@@ -234,8 +279,6 @@ protected:
             return false;
         }
 
-        // TODO: Watch out for more than one \n in a row.
-        // TODO: Wathc out for empty data.
         uint8 const* str = &packet.cmd.simpl.data[0];
         while (*str)
         {
@@ -268,28 +311,42 @@ protected:
     std::optional<accept_msg_content> result = {};
 
     bool on_packet_receive(packet const& packet) override {
-        if (!packet.cmd.check_header("CAN_ADD") &&
-            !packet.cmd.check_header("NO_WAY")) {
-            logger.pckg_error(packet.addr, "Unexpected header");
-            return false;
-        }
-
         // If we've got one reposne, we dont have to wait for more.
         if (packet.cmd.check_header("CAN_ADD"))
         {
-            // TODO: SANITIZE THE PACKET!
             logger.trace_packet("Received", packet, cmd_type::cmplx);
+
+            if (!packet.cmd.contains_required_fields(cmd_type::cmplx, packet.msg_len)) {
+                logger.pckg_error(packet.addr, "CAN_ADD response too short");
+                return false;
+            }
+
+            if (packet.cmd.contains_data(cmd_type::cmplx, packet.msg_len)) {
+                logger.pckg_error(packet.addr, "CAN_ADD response shouldn't contain data");
+                return false;
+            }
 
             result = accept_msg_content{packet.addr, packet.cmd.cmplx.get_param()};
             return true;
         }
         else if (packet.cmd.check_header("NO_WAY"))
         {
-            // TODO: SANITIZE THE PACKET!
             logger.trace_packet("Received", packet, cmd_type::simpl);
+
+            if (!packet.cmd.contains_required_fields(cmd_type::simpl, packet.msg_len)) {
+                logger.pckg_error(packet.addr, "NO_WAY response too short");
+                return false;
+            }
+
+            if (!packet.cmd.contains_data(cmd_type::simpl, packet.msg_len)) {
+                logger.pckg_error(packet.addr, "NO_WAY response shouldn contain data");
+                return false;
+            }
+
             return true;
         }
 
+        logger.pckg_error(packet.addr, "Unexpected header");
         return false;
     }
 
@@ -302,15 +359,9 @@ struct get_packet_handler : basic_packet_handler<std::optional<accept_msg_conten
 {
     using basic_packet_handler::basic_packet_handler;
 protected:
-    // Non-null if one server has agree to take the file.
     std::optional<accept_msg_content> result = {};
 
     bool on_packet_receive(packet const& packet) override {
-        if (!packet.cmd.check_header("CONNECT_ME")) {
-            logger.pckg_error(packet.addr, "Unexpected header");
-            return false;
-        }
-
         // If we've got one reposne, we dont have to wait for more.
         if (packet.cmd.check_header("CONNECT_ME"))
         {
@@ -320,6 +371,7 @@ protected:
             return true;
         }
 
+        logger.pckg_error(packet.addr, "Unexpected header");
         return false;
     }
 
@@ -328,7 +380,7 @@ protected:
     }
 };
 
-void packets_thread(int sock)
+static void packets_thread(int sock)
 {
     struct pollfd pfd[2];
     pfd[0].fd = signal_fd;
@@ -360,7 +412,7 @@ void packets_thread(int sock)
     }
 }
 
-void try_upload_file(int sock,
+static void try_upload_file(int sock,
                      sockaddr_in remote_address,
                      std::string filename,
                      fs::path file_path)
@@ -396,8 +448,8 @@ void try_upload_file(int sock,
     {
         uint64 packet_id = cmd_seq_counter++;
         packet send = packet::make_cmplx("ADD", packet_id, file_size,
-                                                   (uint8 const*)filename.c_str(),
-                                                   filename.size(), serv.uaddr);
+                                         (uint8 const*)filename.c_str(),
+                                         filename.size(), serv.uaddr);
 
         add_packet_handler ph_add{packet_id};
         logger.trace_packet("Sending to", send, cmd_type::cmplx);
@@ -451,7 +503,7 @@ void try_upload_file(int sock,
         logger.println("File %s too big", filename.c_str());
 }
 
-void try_receive_file(int sock,
+static void try_receive_file(int sock,
                       search_entry found_server,
                       std::string filename)
 {
@@ -521,55 +573,6 @@ void try_receive_file(int sock,
                    server_agreement->awaiting_port_num);
 }
 
-client_options parse_args(int argc, char** argv)
-{
-    client_options retval{};
-    for (int i = 1; i < argc; ++i)
-    {
-        uint32 arg_hashed = strhash(argv[i]);
-
-        // Every arg has a pair.
-        if (i == argc - 1)
-            logger.fatal("Invalid arguments");
-
-        switch (arg_hashed)
-        {
-            case strhash("-g"): { // MCAST_ADDR
-                ++i;
-                retval.mcast_addr = std::string{argv[i]};
-            } break;
-
-            case strhash("-p"): { // CMD_PORT
-                ++i;
-                int32 port = std::stoi(argv[i]);
-                retval.cmd_port = port;
-            } break;
-
-            case strhash("-o"): { // OUT_FLDR
-                ++i;
-                retval.out_fldr = std::string{argv[i]};
-            } break;
-
-            case strhash("-t"): { // TIMEOUT
-                ++i;
-                int32 timeout = std::min(std::stoi(argv[i]), 300);
-                retval.timeout = timeout;
-            } break;
-
-            default:
-                logger.fatal("Invalid arguments");
-        }
-    }
-
-    // If any of the fields is null, a required field was not set, so we exit.
-    if (!retval.mcast_addr || !retval.out_fldr || !retval.cmd_port || !retval.timeout)
-    {
-        logger.fatal("Missing required arguments");
-    }
-
-    return retval;
-}
-
 int
 main(int argc, char** argv)
 {
@@ -619,7 +622,7 @@ main(int argc, char** argv)
 
     timeval tv = chrono_to_posix(chrono::seconds{*co.timeout});
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (timeval*)&tv, sizeof(timeval));
-    // TODO: Send timeout.
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (timeval*)&tv, sizeof(timeval));
 
     // HACK: We can't really use signalfd as we used in the server to stop the
     // threads, because in this case we have two; one awaiting packets, and one
@@ -778,9 +781,6 @@ main(int argc, char** argv)
             // We load the whole file into memory to avoid races.
             if (fs::exists(upload_file_path))
             {
-                logger.trace("File %s(%s) exists",
-                             upload_file_path.c_str(), filename.c_str());
-
                 workers.push_back(std::thread{try_upload_file,
                                               sock,
                                               remote_address,
