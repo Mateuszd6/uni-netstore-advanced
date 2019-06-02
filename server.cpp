@@ -244,7 +244,6 @@ static void receive_file(int sock, fs::path file_path, size_t expected_size)
         if (*so.synchronized)
         {
             std::string filename = file_path.filename().string();
-
             sync_tell_other_to_delete(mcast_socket, filename);
         }
     }

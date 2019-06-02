@@ -4,13 +4,13 @@ CC=g++
 
 COMMON_CFLAGS=--std=c++17
 DEBUG_FLAGS=-g -O0 -DDEBUG -DTRACE -fno-omit-frame-pointer
-RELEASE_FLAGS=-O3 -DNDEBUG
+RELEASE_FLAGS=-O3 -g -DNDEBUG
 INCLUDE_FLAGS=-I.
 LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
-WARN_FLAGS=-Wall -Wextra -Wshadow
+WARN_FLAGS=-Wall -Wextra -Wshadow -Wno-sign-compare
 
 # students has completly broken sanitizer dependencies.
-SANITIZERS=#-fsanitize=undefined
+SANITIZERS= #-fsanitize=undefined
 
 COMMON_OBJ=cmd.o connection.o logger.o
 CLIENT_OBJ=client.o
@@ -28,7 +28,7 @@ debug: all
 .cpp.o:
 	$(CC) $(CFLAGS) -c $< -o $@
 
-all: clean $(CLIENT_EXE) $(SERVER_EXE) # TODO: Dont clean
+all: clean $(CLIENT_EXE) $(SERVER_EXE)
 
 
 $(CLIENT_EXE): $(COMMON_OBJ) $(CLIENT_OBJ)

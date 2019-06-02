@@ -70,7 +70,7 @@ void cmd_cmplx_t::set_param(uint64 val)
 
 bool command::check_header(char const* usr_head) const
 {
-    size_t usr_head_len = strlen(head);
+    size_t usr_head_len = strlen(usr_head);
     assert(usr_head_len <= 10);
 
     if (memcmp(head, usr_head, usr_head_len) != 0)
@@ -111,13 +111,6 @@ bool command::contains_data(cmd_type type, ssize_t msg_size) const
 
 packet::packet() : cmd{}, addr{} {
     addr_len = sizeof(addr);
-                  }
-
-packet::packet(command cmd_, size_t msg_len_, sockaddr_in addr_) {
-    this->cmd = cmd_;
-    this->msg_len = msg_len_;
-    this->addr = addr_;
-    this->addr_len = sizeof(addr_);
 }
 
 std::string_view packet::data_as_sv(cmd_type type) const {
@@ -147,6 +140,7 @@ packet packet::make_simpl(char const* head, uint64 cmd_seq,
     retval.addr = addr;
     retval.msg_len = command::simpl_head_size + data_len;
 
+    retval.cmd.clear();
     retval.cmd.set_head(head);
     retval.cmd.set_cmd_seq(cmd_seq);
     if (data != nullptr)
@@ -163,6 +157,7 @@ packet packet::make_cmplx(char const* head, uint64 cmd_seq,
     retval.addr = addr;
     retval.msg_len = command::cmplx_head_size + data_len;
 
+    retval.cmd.clear();
     retval.cmd.set_head(head);
     retval.cmd.set_cmd_seq(cmd_seq);
     retval.cmd.cmplx.set_param(param);
