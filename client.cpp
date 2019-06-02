@@ -508,8 +508,12 @@ static void try_receive_file(int sock, search_entry found_server,
 
   auto [success, reason] =
       recv_file_stream(stream_sock, out, std::nullopt, signal_fd);
+
   safe_close(stream_sock);
   if (!success) {
+    // If the file wasn't downloaded don't leave in partially in the outdir.
+    try{ fs::remove(out); }
+    catch (...) { }
     report_error(reason);
     return;
   }
