@@ -1,9 +1,7 @@
 #include "logger.hpp"
 
-// TODO: DOnt define it here.
-#define TRACE
-
 void logger_t::trace(char const* fmt, ...) {
+    (void(fmt));
 #ifdef TRACE
     std::lock_guard<std::mutex> m{logger_mutex};
 
@@ -19,6 +17,10 @@ void logger_t::trace_packet(char const* description,
                             packet const& packet,
                             cmd_type type)
 {
+    (void(description));
+    (void(packet));
+    (void(type));
+
 #ifdef TRACE
     std::lock_guard<std::mutex> m{logger_mutex};
 

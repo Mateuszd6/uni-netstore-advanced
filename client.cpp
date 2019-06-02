@@ -583,6 +583,14 @@ main(int argc, char** argv)
     logger.trace("  OUT_FLDR = %s", co.out_fldr->c_str());
     logger.trace("  TIMEOUT = %d", *co.timeout);
 
+    // This does nothing if the directory already exists.
+
+    fs::path output_fldr{* co.out_fldr};
+    try {
+        fs::create_directories(output_fldr);
+    }
+    catch(...) { }
+
     // zmienne i struktury opisujące gniazda
     int sock, optval;
     //  struct sockaddr_in local_address;

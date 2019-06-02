@@ -15,6 +15,7 @@ char const* command::get_head() const
 void command::set_head(char const* val)
 {
     size_t val_len = strlen(val);
+    (void(val_len));
     assert(val_len <= 10);
 
     bzero(head, 10);

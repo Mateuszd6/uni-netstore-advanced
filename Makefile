@@ -4,7 +4,7 @@
 CC=clang++
 
 COMMON_CFLAGS=--std=c++17
-DEBUG_FLAGS=-g -O0 -DDEBUG -fno-omit-frame-pointer
+DEBUG_FLAGS=-g -O0 -DDEBUG -DTRACE -fno-omit-frame-pointer
 RELEASE_FLAGS=-O3 -DNDEBUG
 INCLUDE_FLAGS=-I.
 LINK_FLAGS=-lpthread -lboost_filesystem -lboost_system
@@ -20,13 +20,11 @@ SERVER_OBJ=server.o
 CLIENT_EXE=netstore-client
 SERVER_EXE=netstore-server
 
-#TODO: Swap the targets, so that release is default.
+release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
+release: all
 
 debug: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(SANITIZERS) $(DEBUG_FLAGS) $(INCLUDE_FLAGS)
 debug: all
-
-release: CFLAGS=$(COMMON_CFLAGS) $(WARN_FLAGS) $(RELEASE_FLAGS) $(INCLUDE_FLAGS)
-release: all
 
 .cpp.o:
 	$(CC) $(CFLAGS) -c $< -o $@
